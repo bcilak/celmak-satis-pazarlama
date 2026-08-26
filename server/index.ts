@@ -25,8 +25,40 @@ migrate();
 seed();
 
 const app = express();
-app.use(cors());
+const webOrigins = (process.env.WEB_ORIGIN || "http://localhost:3000")
+  .split(",")
+  .map((value) => value.trim().replace(/\/$/, ""))
+  .filter(Boolean);
+app.set("trust proxy", 1);
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin || webOrigins.includes(origin)) return callback(null, true);
+      return callback(new Error("Bu kaynaktan erişime izin verilmiyor."));
+    },
+    credentials: true,
+  }),
+);
 app.use(express.json({ limit: "1mb" }));
+
+app.get("/api/health", (_req, res) => {
+  res.json({ status: "ok", database: "sqlite" });
+});
+
+const sessionCookie = (token: string, maxAge = 43200) => {
+  const crossOrigin = process.env.CROSS_ORIGIN_COOKIES === "true";
+  const secure = process.env.NODE_ENV === "production" || crossOrigin;
+  return [
+    `celmak_session=${token}`,
+    "HttpOnly",
+    `SameSite=${crossOrigin ? "None" : "Lax"}`,
+    "Path=/",
+    `Max-Age=${maxAge}`,
+    secure ? "Secure" : "",
+  ]
+    .filter(Boolean)
+    .join("; ");
+};
 
 function addDays(value: string, days: number) {
   const date = new Date(`${value}T12:00:00Z`);
@@ -213,7 +245,7 @@ app.post("/api/auth/login", (req, res) => {
   );
   res.setHeader(
     "set-cookie",
-    `celmak_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200`,
+    sessionCookie(token),
   );
   audit(
     user.id,
@@ -242,7 +274,7 @@ app.post("/api/auth/forgot-password", (req, res) => {
         "INSERT INTO password_reset_tokens (user_id,token_hash,expires_at) VALUES (?,?,datetime('now','+30 minutes'))",
       ).run(user.id, tokenHash(token));
       console.log(
-        `Parola sıfırlama geliştirme bağlantısı: http://localhost:3000/sifre-sifirla?token=${token}`,
+        `Parola sıfırlama geliştirme bağlantısı: ${webOrigins[0]}/sifre-sifirla?token=${token}`,
       );
     }
   }
@@ -375,7 +407,7 @@ app.post("/api/auth/passkey/verify", async (req, res) => {
     });
     res.setHeader(
       "set-cookie",
-      `celmak_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200`,
+      sessionCookie(token),
     );
     res.json({ verified: true });
   } catch (error) {
@@ -442,7 +474,7 @@ app.post("/api/auth/logout", (req, res) => {
     ).run(tokenHash(token));
   res.setHeader(
     "set-cookie",
-    "celmak_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
+    sessionCookie("", 0),
   );
   res.json({ message: "Oturum kapatıldı." });
 });
@@ -2295,6 +2327,6 @@ app.use((error: unknown, req: Request, res: Response, _next: NextFunction) => {
 });
 
 const port = Number(process.env.PORT || 3001);
-app.listen(port, "127.0.0.1", () =>
-  console.log(`Çelmak API http://127.0.0.1:${port} adresinde çalışıyor.`),
+app.listen(port, "0.0.0.0", () =>
+  console.log(`Çelmak API 0.0.0.0:${port} adresinde çalışıyor.`),
 );

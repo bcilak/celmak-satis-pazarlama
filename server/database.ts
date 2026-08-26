@@ -5,7 +5,9 @@ import { fileURLToPath } from 'node:url'
 import { randomBytes, scryptSync } from 'node:crypto'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const dataDir = resolve(root, 'data')
+// Railway/Render gibi ortamlarda kalıcı diskin bağlandığı yolu dışarıdan alır.
+// Yerel geliştirmede mevcut data klasörü kullanılmaya devam eder.
+const dataDir = process.env.DATA_DIR ? resolve(process.env.DATA_DIR) : resolve(root, 'data')
 mkdirSync(dataDir, { recursive: true })
 
 export const db = new DatabaseSync(resolve(dataDir, 'celmak.db'))
