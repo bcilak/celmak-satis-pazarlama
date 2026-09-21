@@ -13,6 +13,7 @@ export type Customer = {
   codeSource: "AUTO" | "MANUAL" | "EXTERNAL";
   externalSystem?: string;
   externalId?: string;
+  tags?: string;
 };
 export type Product = {
   id: number;
@@ -77,6 +78,23 @@ export type Instrument = {
   collectionRate?: number;
   collectedTryAmount?: number;
   exchangeDifference?: number;
+  discountCompany?: string;
+  discountRate?: number;
+  discountFee?: number;
+  discountCommission?: number;
+  discountTax?: number;
+  discountNetAmount?: number;
+  discountCashAmount?: number;
+  discountFinanceCost?: number;
+  discountDate?: string;
+  discountPricingMethod?: "DIRECT"|"ANNUAL";
+  discountAnnualRate?: number;
+  discountDays?: number;
+  discountWithRecourse?: number;
+  endorsementCompany?: string;
+  endorsementAmount?: number;
+  endorsementDate?: string;
+  endorsementReference?: string;
 };
 export type EDocument = {
   id: number;
@@ -120,6 +138,7 @@ export const statusLabels: Record<string, string> = {
   RETURNED: "İade",
   ENDORSED: "Ciro edildi",
   ASSIGNED: "Temlik edildi",
+  DISCOUNTED: "Kırdırıldı",
   QUEUED: "Kuyrukta",
   SENT: "Gönderildi",
   ERROR: "Hata",

@@ -60,12 +60,6 @@ const sessionCookie = (token: string, maxAge = 43200) => {
     .join("; ");
 };
 
-function addDays(value: string, days: number) {
-  const date = new Date(`${value}T12:00:00Z`);
-  date.setUTCDate(date.getUTCDate() + days);
-  return date.toISOString().slice(0, 10);
-}
-
 function postLedger(input: {
   customerId: number;
   type: string;
@@ -724,7 +718,8 @@ app.get("/api/customers", (_req, res) => {
       .prepare(
         `SELECT id, code, name, tax_number taxNumber, phone, email, city,
     payment_term_days paymentTermDays, risk_limit riskLimit, balance, code_source codeSource,
-    external_system externalSystem, external_id externalId FROM customers WHERE active=1 ORDER BY name`,
+    external_system externalSystem, external_id externalId,
+    (SELECT GROUP_CONCAT(tag) FROM customer_tags ct WHERE ct.customer_id=customers.id) tags FROM customers WHERE active=1 ORDER BY name`,
       )
       .all(),
   );
@@ -742,6 +737,7 @@ const customerSchema = z.object({
   codeSource: z.enum(["AUTO", "MANUAL", "EXTERNAL"]).default("AUTO"),
   externalSystem: z.string().trim().max(40).optional(),
   externalId: z.string().trim().max(80).optional(),
+  tags: z.array(z.enum(["CUSTOMER","SUPPLIER","DEALER"])).min(1).default(["CUSTOMER"]),
 });
 app.post(
   "/api/customers",
@@ -798,6 +794,8 @@ app.post(
             : input.code!;
         if (input.codeSource === "AUTO")
           db.prepare("UPDATE customers SET code=? WHERE id=?").run(code, id);
+        const addTag=db.prepare("INSERT INTO customer_tags (customer_id,tag) VALUES (?,?)");
+        for(const tag of input.tags)addTag.run(id,tag);
         audit(
           req.user.id,
           "CUSTOMER_CREATED",
@@ -830,7 +828,8 @@ app.get("/api/customers/:id", (req, res) => {
   const customer = db
     .prepare(
       `SELECT id,code,name,tax_number taxNumber,phone,email,city,payment_term_days paymentTermDays,
-    risk_limit riskLimit,balance,code_source codeSource,external_system externalSystem,external_id externalId,created_at createdAt
+    risk_limit riskLimit,balance,code_source codeSource,external_system externalSystem,external_id externalId,created_at createdAt,
+    (SELECT GROUP_CONCAT(tag) FROM customer_tags ct WHERE ct.customer_id=customers.id) tags
     FROM customers WHERE id=? AND active=1`,
     )
     .get(id);
@@ -906,7 +905,7 @@ const receiptSchema = z.object({
   customerId: z.number().int().positive(),
   saleId: z.number().int().positive().optional(),
   paymentScheduleId: z.number().int().positive().optional(),
-  method: z.enum(["CASH", "BANK_TRANSFER"]),
+  method: z.enum(["CASH", "BANK_TRANSFER", "CHECK"]),
   receiptDate: z.string().date(),
   amount: z.number().positive(),
   currency: z.enum(["TRY", "USD", "EUR"]),
@@ -957,7 +956,12 @@ app.post("/api/receipts", allow("ADMIN", "ACCOUNTING"), (req, res) => {
     db.prepare("UPDATE receipts SET number=? WHERE id=?").run(number, id);
     postLedger({
       customerId: input.customerId,
-      type: input.method === "CASH" ? "CASH_RECEIPT" : "BANK_RECEIPT",
+      type:
+        input.method === "CASH"
+          ? "CASH_RECEIPT"
+          : input.method === "CHECK"
+            ? "INSTRUMENT_RECEIPT"
+            : "BANK_RECEIPT",
       date: input.receiptDate,
       description: `${number} tahsilat`,
       credit: input.amount * input.exchangeRate,
@@ -1232,6 +1236,7 @@ const saleSchema = z.object({
   paymentMethod: z.enum(["CASH", "TERM", "CHECK", "MIXED"]),
   paymentTermDays: z.number().int().min(0).max(365),
   downPayment: z.number().min(0),
+  approvalAssigneeId: z.number().int().positive().optional(),
   currency: z.enum(["TRY", "USD", "EUR"]).default("TRY"),
   exchangeRate: z.number().positive().default(1),
   instrumentType: z.enum(["CHECK", "PROMISSORY_NOTE"]).optional(),
@@ -1245,9 +1250,15 @@ const saleSchema = z.object({
       z.object({
         productId: z.number().int().positive(),
         quantity: z.number().positive(),
+        unitPrice: z.number().positive(),
+        vatRate: z.number().min(0).max(100),
       }),
     )
     .min(1),
+  paymentSchedule: z.array(z.object({
+    dueDate: z.string().date(),
+    amount: z.number().positive(),
+  })).min(1).max(24).optional(),
 });
 
 app.get("/api/sales", (_req, res) => {
@@ -1260,6 +1271,17 @@ app.get("/api/sales", (_req, res) => {
     )
     .all();
   res.json(sales);
+});
+
+app.get("/api/approval-assignees", allow("SALES","ADMIN"), (req,res)=>res.json(db.prepare("SELECT id,name,email FROM users WHERE role='ADMIN' AND active=1 AND id<>? ORDER BY name").all(req.user.id)));
+
+app.get("/api/sales/:id/detail", (req,res)=>{
+  const id=Number(req.params.id);const sale=db.prepare(`SELECT s.id,s.number,s.status,s.payment_method paymentMethod,s.subtotal,s.vat_total vatTotal,s.grand_total grandTotal,s.down_payment downPayment,s.currency,s.exchange_rate exchangeRate,s.created_at createdAt,c.id customerId,c.code customerCode,c.name customerName,u.name createdBy,a.name approvalAssignee FROM sales s JOIN customers c ON c.id=s.customer_id JOIN users u ON u.id=s.created_by LEFT JOIN users a ON a.id=s.approval_assignee_id WHERE s.id=?`).get(id);
+  if(!sale)return res.status(404).json({message:"Satış bulunamadı."});
+  const items=db.prepare(`SELECT si.id,p.code,p.name,p.unit,si.quantity,si.unit_price unitPrice,si.vat_rate vatRate,si.line_total lineTotal FROM sale_items si JOIN products p ON p.id=si.product_id WHERE si.sale_id=?`).all(id);
+  const schedule=db.prepare(`SELECT sequence_no sequenceNo,payment_type paymentType,due_date dueDate,amount,paid_amount paidAmount,currency,status FROM payment_schedules WHERE sale_id=? ORDER BY sequence_no`).all(id);
+  const shipments=db.prepare(`SELECT id,number,status,planned_date plannedDate,actual_date actualDate,dispatch_number dispatchNumber FROM shipments WHERE sale_id=? ORDER BY id DESC`).all(id);
+  res.json({sale,items,schedule,shipments});
 });
 
 app.post("/api/sales", allow("SALES", "ADMIN"), (req, res) => {
@@ -1276,15 +1298,13 @@ app.post("/api/sales", allow("SALES", "ADMIN"), (req, res) => {
   if (
     usesInstrument &&
     (!input.instrumentType ||
-      input.instrumentCount < 1 ||
-      !input.firstDueDate ||
-      !input.dueIntervalDays)
+      input.instrumentCount < 1)
   ) {
     return res
       .status(400)
       .json({
         message:
-          "Çek/senet ödemesinde evrak türü, adet, ilk vade ve vade aralığı zorunludur.",
+          "Çek/senet ödemesinde evrak türü ve en az bir vade satırı zorunludur.",
       });
   }
   if (!usesInstrument && input.instrumentCount > 0)
@@ -1315,16 +1335,13 @@ app.post("/api/sales", allow("SALES", "ADMIN"), (req, res) => {
     if (!product) throw new Error("Ürün bulunamadı.");
     if (item.quantity > product.stock_quantity)
       throw new Error("Seçilen miktar kullanılabilir stoktan fazla.");
-    const unitPrice =
-      input.currency === "TRY"
-        ? product.unit_price
-        : Number((product.unit_price / input.exchangeRate).toFixed(4));
+    const unitPrice = Number(item.unitPrice.toFixed(4));
     const base = Number((unitPrice * item.quantity).toFixed(2));
     return {
       ...item,
       unitPrice,
-      vatRate: product.vat_rate,
-      lineTotal: Number((base + (base * product.vat_rate) / 100).toFixed(2)),
+      vatRate: item.vatRate,
+      lineTotal: Number((base + (base * item.vatRate) / 100).toFixed(2)),
     };
   });
   const subtotal = calculatedItems.reduce(
@@ -1340,6 +1357,14 @@ app.post("/api/sales", allow("SALES", "ADMIN"), (req, res) => {
     return res
       .status(400)
       .json({ message: "Peşinat satış toplamından büyük olamaz." });
+  const remainingTotal = Number((grandTotal - input.downPayment).toFixed(2));
+  if (["TERM", "CHECK", "MIXED"].includes(input.paymentMethod)) {
+    if (!input.paymentSchedule?.length)
+      return res.status(400).json({ message: "Vade planına en az bir ödeme satırı ekleyin." });
+    const planTotal = Number(input.paymentSchedule.reduce((sum, row) => sum + row.amount, 0).toFixed(2));
+    if (Math.abs(planTotal - remainingTotal) > 0.01)
+      return res.status(400).json({ message: `Vade planı toplamı ${remainingTotal} ${input.currency} olmalıdır. Girilen: ${planTotal} ${input.currency}` });
+  }
 
   const create = () =>
     transaction(() => {
@@ -1347,8 +1372,8 @@ app.post("/api/sales", allow("SALES", "ADMIN"), (req, res) => {
         .prepare(
           `INSERT INTO sales
       (customer_id, created_by, status, payment_method, payment_term_days, subtotal, vat_total, grand_total, down_payment, note,
-       currency, exchange_rate, exchange_rate_date, instrument_type, instrument_count, first_due_date, due_interval_days)
-      VALUES (?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?, ?, ?, ?, date('now'), ?, ?, ?, ?)`,
+       currency, exchange_rate, exchange_rate_date, instrument_type, instrument_count, first_due_date, due_interval_days,approval_assignee_id)
+      VALUES (?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?, ?, ?, ?, date('now'), ?, ?, ?, ?,?)`,
         )
         .run(
           input.customerId,
@@ -1366,6 +1391,7 @@ app.post("/api/sales", allow("SALES", "ADMIN"), (req, res) => {
           input.instrumentCount,
           input.firstDueDate ?? null,
           input.dueIntervalDays ?? null,
+          input.approvalAssigneeId ?? null,
         );
       const saleId = Number(result.lastInsertRowid);
       const number = `SAT-${new Date().getFullYear()}-${String(saleId).padStart(6, "0")}`;
@@ -1387,49 +1413,33 @@ app.post("/api/sales", allow("SALES", "ADMIN"), (req, res) => {
           `INSERT INTO payment_schedules (sale_id,sequence_no,payment_type,due_date,amount,currency,exchange_rate) VALUES (?,0,'CASH',date('now'),?,?,?)`,
         ).run(saleId, input.downPayment, input.currency, input.exchangeRate);
       if (usesInstrument) {
-        const remaining = grandTotal - input.downPayment;
-        const baseAmount =
-          Math.floor((remaining / input.instrumentCount) * 100) / 100;
+        const plan = input.paymentSchedule!;
         const addSchedule = db.prepare(
           `INSERT INTO payment_schedules (sale_id,sequence_no,payment_type,due_date,amount,currency,exchange_rate) VALUES (?,?,?,?,?,?,?)`,
         );
-        for (let index = 0; index < input.instrumentCount; index++) {
-          const amount =
-            index === input.instrumentCount - 1
-              ? Number((remaining - baseAmount * index).toFixed(2))
-              : baseAmount;
+        for (let index = 0; index < plan.length; index++) {
           addSchedule.run(
             saleId,
             index + 1,
             input.instrumentType!,
-            addDays(input.firstDueDate!, input.dueIntervalDays! * index),
-            amount,
+            plan[index].dueDate,
+            plan[index].amount,
             input.currency,
             input.exchangeRate,
           );
         }
       }
       if (input.paymentMethod === "TERM") {
-        const remaining = grandTotal - input.downPayment;
-        const count = input.termInstallmentCount;
-        const baseAmount = Math.floor((remaining / count) * 100) / 100;
-        const first =
-          input.firstDueDate ||
-          addDays(new Date().toISOString().slice(0, 10), input.paymentTermDays);
-        const interval = input.dueIntervalDays || input.paymentTermDays || 30;
+        const plan = input.paymentSchedule!;
         const addSchedule = db.prepare(
           `INSERT INTO payment_schedules (sale_id,sequence_no,payment_type,due_date,amount,currency,exchange_rate) VALUES (?,?,'BANK_TRANSFER',?,?,?,?)`,
         );
-        for (let index = 0; index < count; index++) {
-          const amount =
-            index === count - 1
-              ? Number((remaining - baseAmount * index).toFixed(2))
-              : baseAmount;
+        for (let index = 0; index < plan.length; index++) {
           addSchedule.run(
             saleId,
             index + 1,
-            addDays(first, interval * index),
-            amount,
+            plan[index].dueDate,
+            plan[index].amount,
             input.currency,
             input.exchangeRate,
           );
@@ -1466,6 +1476,7 @@ app.post("/api/sales/:id/submit", allow("SALES", "ADMIN"), (req, res) => {
         created_by: number;
         number: string;
         grand_total: number;
+        approval_assignee_id:number|null;
       }
     | undefined;
   if (!sale) return res.status(404).json({ message: "Satış bulunamadı." });
@@ -1477,7 +1488,7 @@ app.post("/api/sales/:id/submit", allow("SALES", "ADMIN"), (req, res) => {
     return res
       .status(409)
       .json({ message: "Bu satış mevcut durumunda onaya gönderilemez." });
-  let manager = db
+  let manager = sale.approval_assignee_id?db.prepare("SELECT id FROM users WHERE id=? AND role='ADMIN' AND active=1 AND id<>?").get(sale.approval_assignee_id,req.user.id) as {id:number}|undefined:db
     .prepare(
       "SELECT id FROM users WHERE role='ADMIN' AND active=1 AND id<>? ORDER BY id LIMIT 1",
     )
@@ -1733,6 +1744,12 @@ app.get(
   },
 );
 
+app.get("/api/shipments/:id",allow("ADMIN","SALES","SHIPPING","ACCOUNTING","AUDITOR"),(req,res)=>{
+  const id=Number(req.params.id);const shipment=db.prepare(`SELECT sh.id,sh.number,sh.status,sh.planned_date plannedDate,sh.actual_date actualDate,sh.delivery_address deliveryAddress,sh.vehicle_plate vehiclePlate,sh.driver_name driverName,sh.dispatch_number dispatchNumber,sh.recipient_name recipientName,sh.note,s.number saleNumber,c.name customerName FROM shipments sh JOIN sales s ON s.id=sh.sale_id JOIN customers c ON c.id=sh.customer_id WHERE sh.id=?`).get(id);
+  if(!shipment)return res.status(404).json({message:"Sevkiyat bulunamadı."});
+  const items=db.prepare(`SELECT p.code,p.name,p.unit,shi.quantity FROM shipment_items shi JOIN products p ON p.id=shi.product_id WHERE shi.shipment_id=?`).all(id);res.json({shipment,items});
+});
+
 app.get(
   "/api/shipment-plans",
   allow("ADMIN", "SALES", "SHIPPING"),
@@ -1960,6 +1977,8 @@ app.get(
     CASE WHEN ps.exchange_rate IS NOT NULL AND n.currency<>ps.currency THEN ps.exchange_rate ELSE n.exchange_rate END exchangeRate,
     CASE WHEN ps.exchange_rate IS NOT NULL AND n.currency<>ps.currency THEN ROUND(n.amount*ps.exchange_rate,2) ELSE n.try_amount END tryAmount,
     n.status,n.current_holder currentHolder,
+    dm.counterparty discountCompany,dm.discount_rate discountRate,dm.fee_amount discountFee,dm.commission_amount discountCommission,dm.tax_amount discountTax,dm.net_amount discountNetAmount,dm.cash_amount discountCashAmount,dm.finance_cost discountFinanceCost,dm.movement_date discountDate,dm.pricing_method discountPricingMethod,dm.annual_rate discountAnnualRate,dm.days_to_maturity discountDays,dm.with_recourse discountWithRecourse,
+    em.counterparty endorsementCompany,em.settlement_amount endorsementAmount,em.movement_date endorsementDate,em.document_reference endorsementReference,
     CAST(julianday(n.due_date)-julianday(date('now')) AS INTEGER) daysToDue,
     r.receipt_date collectionDate,r.exchange_rate collectionRate,r.try_amount collectedTryAmount,
     CASE WHEN r.id IS NULL THEN NULL ELSE ROUND(n.amount*(r.exchange_rate-n.exchange_rate),2) END exchangeDifference,
@@ -1967,12 +1986,87 @@ app.get(
     LEFT JOIN sales s ON s.id=n.sale_id
     LEFT JOIN payment_schedules ps ON ps.id=n.payment_schedule_id
     LEFT JOIN receipts r ON r.id=(SELECT MAX(r2.id) FROM receipts r2 WHERE r2.payment_schedule_id=n.payment_schedule_id AND r2.status='COMPLETED')
+    LEFT JOIN instrument_movements dm ON dm.id=(SELECT MAX(im.id) FROM instrument_movements im WHERE im.instrument_id=n.id AND im.discount_rate IS NOT NULL)
+    LEFT JOIN instrument_movements em ON em.id=(SELECT MAX(im2.id) FROM instrument_movements im2 WHERE im2.instrument_id=n.id AND im2.movement_kind='ENDORSEMENT')
     ORDER BY n.due_date,n.id`,
         )
         .all(),
     );
   },
 );
+
+const instrumentIntakeSchema=z.object({
+  customerId:z.number().int().positive(),amount:z.number().positive(),currency:z.enum(["TRY","USD","EUR"]),exchangeRate:z.number().positive(),
+  issuer:z.string().trim().min(2).max(160),serialNumber:z.string().trim().min(1).max(80),bankName:z.string().trim().min(2).max(120),issueDate:z.string().date(),dueDate:z.string().date(),note:z.string().trim().max(500).optional()
+});
+app.post("/api/instruments/intake",allow("ADMIN","ACCOUNTING"),(req,res)=>{
+  const parsed=instrumentIntakeSchema.safeParse(req.body);if(!parsed.success)return res.status(400).json({message:"Teslim alınan çek bilgileri eksik veya geçersiz."});const input=parsed.data;
+  const customer=db.prepare("SELECT id FROM customers WHERE id=? AND active=1").get(input.customerId);if(!customer)return res.status(404).json({message:"Müşteri bulunamadı."});
+  const result=transaction(()=>{const inserted=db.prepare(`INSERT INTO negotiable_instruments (number,instrument_type,customer_id,due_date,amount,currency,exchange_rate,try_amount,status,current_holder,issuer,serial_number,bank_name,issue_date,created_by) VALUES ('TEMP','CHECK',?,?,?,?,?,?,?,'IN_PORTFOLIO','Çelmak',?,?,?,?,?)`).run(input.customerId,input.dueDate,input.amount,input.currency,input.exchangeRate,input.amount*input.exchangeRate,input.issuer,input.serialNumber,input.bankName,input.issueDate,req.user.id);const id=Number(inserted.lastInsertRowid);const number=`EVR-${new Date().getFullYear()}-S-${String(id).padStart(6,"0")}`;db.prepare("UPDATE negotiable_instruments SET number=? WHERE id=?").run(number,id);db.prepare(`INSERT INTO instrument_movements (instrument_id,from_status,to_status,counterparty,movement_date,note,created_by) VALUES (?,'PLANNED','IN_PORTFOLIO','Çelmak',?,?,?)`).run(id,input.issueDate,input.note||null,req.user.id);postLedger({customerId:input.customerId,type:"INSTRUMENT_RECEIVED",date:input.issueDate,description:`${number} çek teslim alındı`,credit:input.amount*input.exchangeRate,currency:input.currency,foreignAmount:input.amount,rate:input.exchangeRate,sourceType:"INSTRUMENT_RECEIVED",sourceId:id,actorId:req.user.id});audit(req.user.id,"INSTRUMENT_RECEIVED","negotiable_instrument",id,null,{number,...input},req.ip,req.correlationId);return{id,number}});res.status(201).json({...result,message:`${result.number} portföye alındı ve müşteri carisinden düşüldü.`});
+});
+
+const discountSchema = z.object({
+  company: z.string().trim().min(2).max(160),
+  discountRate: z.number().min(0).max(100),
+  pricingMethod: z.enum(["DIRECT", "ANNUAL"]).default("DIRECT"),
+  commissionAmount: z.number().min(0).default(0),
+  taxAmount: z.number().min(0).default(0),
+  feeAmount: z.number().min(0).default(0),
+  withRecourse: z.boolean().default(true),
+  transactionDate: z.string().date(),
+  note: z.string().trim().max(500).optional(),
+});
+
+const endorsementSchema = z.object({
+  counterpartyCustomerId: z.number().int().positive(),
+  settlementAmount: z.number().positive(),
+  transactionDate: z.string().date(),
+  documentReference: z.string().trim().min(1).max(100),
+  note: z.string().trim().max(500).optional(),
+});
+
+app.post("/api/instruments/:id/endorse", allow("ADMIN", "ACCOUNTING"), (req, res) => {
+  const parsed = endorsementSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ message: "Ciro bilgileri eksik veya geçersiz." });
+  const instrument = db.prepare("SELECT * FROM negotiable_instruments WHERE id=?").get(Number(req.params.id)) as {id:number;number:string;status:string;amount:number;currency:string;exchange_rate:number;customer_id:number;issuer:string|null;serial_number:string|null;bank_name:string|null;instrument_type:string}|undefined;
+  if (!instrument) return res.status(404).json({ message: "Ciro edilecek evrak bulunamadı." });
+  if (!["IN_PORTFOLIO","GIVEN_TO_BANK"].includes(instrument.status)) return res.status(409).json({ message: "Yalnızca portföydeki veya bankadan geri alınan aktif evrak ciro edilebilir." });
+  if (!instrument.issuer || !instrument.serial_number || (instrument.instrument_type === "CHECK" && !instrument.bank_name)) return res.status(409).json({ message: "Cirodan önce evrak bilgilerini tamamlayın." });
+  if (parsed.data.counterpartyCustomerId === instrument.customer_id) return res.status(400).json({ message: "Çeki aldığınız cari ile ciro edeceğiniz cari aynı olamaz." });
+  if (parsed.data.settlementAmount > instrument.amount) return res.status(400).json({ message: "Mahsup tutarı çekin nominal tutarını aşamaz." });
+  const counterparty = db.prepare(`SELECT c.id,c.name,c.balance,EXISTS(SELECT 1 FROM customer_tags ct WHERE ct.customer_id=c.id AND ct.tag='SUPPLIER') is_supplier FROM customers c WHERE c.id=? AND c.active=1`).get(parsed.data.counterpartyCustomerId) as {id:number;name:string;balance:number;is_supplier:number}|undefined;
+  if (!counterparty || !counterparty.is_supplier) return res.status(400).json({ message: "Ciro yapılacak cari aktif bir tedarikçi olmalıdır." });
+  const settlementTry = Number((parsed.data.settlementAmount * instrument.exchange_rate).toFixed(2));
+  if (counterparty.balance >= 0) return res.status(409).json({ message: `${counterparty.name} carisinde kapatılabilecek açık tedarikçi borcu bulunmuyor.` });
+  if (settlementTry > Math.abs(counterparty.balance) + 0.01) return res.status(409).json({ message: `Mahsup tutarı açık tedarikçi borcunu aşıyor. En fazla ${Math.abs(counterparty.balance).toFixed(2)} TL kapatılabilir.` });
+  transaction(() => {
+    const movement = db.prepare(`INSERT INTO instrument_movements (instrument_id,from_status,to_status,counterparty,movement_date,note,created_by,movement_kind,counterparty_customer_id,settlement_amount,cash_amount,finance_cost,document_reference) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(instrument.id,instrument.status,"ENDORSED",counterparty.name,parsed.data.transactionDate,parsed.data.note||null,req.user.id,"ENDORSEMENT",counterparty.id,parsed.data.settlementAmount,0,0,parsed.data.documentReference);
+    db.prepare("UPDATE negotiable_instruments SET status='ENDORSED',current_holder=? WHERE id=?").run(counterparty.name,instrument.id);
+    postLedger({customerId:counterparty.id,type:"INSTRUMENT_PAYMENT",date:parsed.data.transactionDate,description:`${instrument.number} ciro ile borç kapama · ${parsed.data.documentReference}`,debit:settlementTry,currency:instrument.currency,foreignAmount:parsed.data.settlementAmount,rate:instrument.exchange_rate,sourceType:"INSTRUMENT_ENDORSE",sourceId:instrument.id,actorId:req.user.id});
+    audit(req.user.id,"INSTRUMENT_ENDORSED","negotiable_instrument",instrument.id,{status:instrument.status},{...parsed.data,counterpartyName:counterparty.name,cashAmount:0,financeCost:0,movementId:Number(movement.lastInsertRowid)},req.ip,req.correlationId);
+  });
+  res.json({ message: `${instrument.number}, ${counterparty.name} carisine ciro edildi. ${parsed.data.settlementAmount.toFixed(2)} ${instrument.currency} borç kapatıldı; nakit ve finansman maliyeti oluşmadı.` });
+});
+
+app.post("/api/instruments/:id/discount", allow("ADMIN", "ACCOUNTING"), (req, res) => {
+  const parsed = discountSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ message: "Çek kırdırma bilgileri eksik veya geçersiz." });
+  const instrument = db.prepare("SELECT * FROM negotiable_instruments WHERE id=? AND instrument_type='CHECK'").get(Number(req.params.id)) as {id:number;number:string;status:string;amount:number;currency:string;due_date:string;issuer:string|null;serial_number:string|null;bank_name:string|null}|undefined;
+  if (!instrument) return res.status(404).json({ message: "Kırdırılacak çek bulunamadı." });
+  if (["COLLECTED","CANCELLED","ENDORSED","ASSIGNED"].includes(instrument.status)) return res.status(409).json({ message: "Tahsil edilmiş, iptal edilmiş veya devredilmiş çek kırılamaz." });
+  if (!instrument.issuer || !instrument.serial_number || !instrument.bank_name) return res.status(409).json({ message: "Kırdırmadan önce keşideci, seri no ve banka bilgilerini tamamlayın." });
+  const daysToMaturity=Math.max(0,Math.ceil((new Date(`${instrument.due_date}T12:00:00`).getTime()-new Date(`${parsed.data.transactionDate}T12:00:00`).getTime())/86400000));
+  const discountAmount = Number((instrument.amount * parsed.data.discountRate / 100 * (parsed.data.pricingMethod==="ANNUAL"?daysToMaturity/360:1)).toFixed(2));
+  const netAmount = Number((instrument.amount - discountAmount - parsed.data.commissionAmount - parsed.data.taxAmount - parsed.data.feeAmount).toFixed(2));
+  if (netAmount <= 0) return res.status(400).json({ message: "Kesinti ve masraflar çek tutarından küçük olmalıdır." });
+  transaction(() => {
+    db.prepare(`INSERT INTO instrument_movements (instrument_id,from_status,to_status,counterparty,movement_date,discount_rate,fee_amount,commission_amount,tax_amount,net_amount,pricing_method,annual_rate,days_to_maturity,with_recourse,note,created_by,movement_kind,settlement_amount,cash_amount,finance_cost) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(instrument.id,instrument.status,"ASSIGNED",parsed.data.company,parsed.data.transactionDate,parsed.data.discountRate,parsed.data.feeAmount,parsed.data.commissionAmount,parsed.data.taxAmount,netAmount,parsed.data.pricingMethod,parsed.data.pricingMethod==="ANNUAL"?parsed.data.discountRate:null,daysToMaturity,parsed.data.withRecourse?1:0,parsed.data.note||null,req.user.id,"DISCOUNT",instrument.amount,netAmount,discountAmount+parsed.data.commissionAmount+parsed.data.taxAmount+parsed.data.feeAmount);
+    db.prepare(`INSERT INTO treasury_transactions (instrument_id,transaction_type,transaction_date,currency,gross_amount,bank_amount,discount_amount,commission_amount,tax_amount,other_fee_amount,counterparty,created_by) VALUES (?,'CHECK_DISCOUNT',?,?,?,?,?,?,?,?,?,?)`).run(instrument.id,parsed.data.transactionDate,instrument.currency,instrument.amount,netAmount,discountAmount,parsed.data.commissionAmount,parsed.data.taxAmount,parsed.data.feeAmount,parsed.data.company,req.user.id);
+    db.prepare("UPDATE negotiable_instruments SET status='ASSIGNED',current_holder=? WHERE id=?").run(parsed.data.company,instrument.id);
+    audit(req.user.id,"INSTRUMENT_DISCOUNTED","negotiable_instrument",instrument.id,{status:instrument.status},{...parsed.data,daysToMaturity,discountAmount,netAmount},req.ip,req.correlationId);
+  });
+  res.json({ message: `${instrument.number} çeki ${parsed.data.company} firmasında kırdırıldı. Net tutar: ${netAmount}`, discountAmount, netAmount });
+});
 
 const instrumentDetailSchema = z.object({
   issuer: z.string().trim().min(2).max(160),
@@ -2130,6 +2224,7 @@ app.post(
             "Dövizli evrak tahsilatında gerçekleşen tahsilat kuru zorunludur.",
         });
     transaction(() => {
+      const wasReceived=!!db.prepare("SELECT 1 FROM account_transactions WHERE source_type='INSTRUMENT_RECEIVED' AND source_id=?").get(instrument.id);
       db.prepare(
         `INSERT INTO instrument_movements (instrument_id,from_status,to_status,counterparty,movement_date,exchange_rate,note,created_by) VALUES (?,?,?,?,?,?,?,?)`,
       ).run(
@@ -2149,6 +2244,10 @@ app.post(
         parsed.data.counterparty ?? null,
         instrument.id,
       );
+      if (parsed.data.status === "IN_PORTFOLIO" && !wasReceived) {
+        postLedger({customerId:instrument.customer_id,type:"INSTRUMENT_RECEIVED",date:parsed.data.movementDate,description:`${instrument.number} çek/senet teslim alındı`,credit:instrument.amount*instrument.exchange_rate,currency:instrument.currency,foreignAmount:instrument.amount,rate:instrument.exchange_rate,sourceType:"INSTRUMENT_RECEIVED",sourceId:instrument.id,actorId:req.user.id});
+        if(instrument.payment_schedule_id) db.prepare("UPDATE payment_schedules SET status='PAID',paid_amount=amount WHERE id=?").run(instrument.payment_schedule_id);
+      }
       if (parsed.data.status === "COLLECTED" && instrument.payment_schedule_id)
         db.prepare("UPDATE payment_schedules SET status='PAID',paid_amount=amount WHERE id=?").run(
           instrument.payment_schedule_id,
@@ -2157,6 +2256,7 @@ app.post(
         const collectionRate =
           parsed.data.exchangeRate || instrument.exchange_rate;
         const tryAmount = instrument.amount * collectionRate;
+        db.prepare(`INSERT OR IGNORE INTO treasury_transactions (instrument_id,transaction_type,transaction_date,currency,gross_amount,bank_amount,counterparty,created_by) VALUES (?,'CHECK_COLLECTION',?,?,?,?,?,?)`).run(instrument.id,parsed.data.movementDate,instrument.currency,instrument.amount,instrument.amount,instrument.bank_name,req.user.id);
         const receiptResult = db
           .prepare(
             `INSERT INTO receipts (customer_id,sale_id,payment_schedule_id,method,receipt_date,amount,currency,exchange_rate,try_amount,reference,created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
@@ -2201,19 +2301,7 @@ app.post(
             sourceId: instrument.id,
             actorId: req.user.id,
           });
-        postLedger({
-          customerId: instrument.customer_id,
-          type: "INSTRUMENT_RECEIPT",
-          date: parsed.data.movementDate,
-          description: `${instrument.number} tahsilatı`,
-          credit: tryAmount,
-          currency: instrument.currency,
-          foreignAmount: instrument.amount,
-          rate: collectionRate,
-          sourceType: "INSTRUMENT_RECEIPT",
-          sourceId: instrument.id,
-          actorId: req.user.id,
-        });
+        if (!wasReceived) postLedger({customerId:instrument.customer_id,type:"INSTRUMENT_RECEIVED",date:parsed.data.movementDate,description:`${instrument.number} tahsil edildi`,credit:tryAmount,currency:instrument.currency,foreignAmount:instrument.amount,rate:collectionRate,sourceType:"INSTRUMENT_RECEIVED",sourceId:instrument.id,actorId:req.user.id});
         audit(
           req.user.id,
           "EXCHANGE_DIFFERENCE_CALCULATED",
@@ -2224,6 +2312,12 @@ app.post(
           req.ip,
           req.correlationId,
         );
+      }
+      if (parsed.data.status === "BOUNCED" && wasReceived) {
+        postLedger({customerId:instrument.customer_id,type:"INSTRUMENT_BOUNCED",date:parsed.data.movementDate,description:`${instrument.number} karşılıksız çıktı; müşteri borcu yeniden açıldı`,debit:instrument.amount*instrument.exchange_rate,currency:instrument.currency,foreignAmount:instrument.amount,rate:instrument.exchange_rate,sourceType:"INSTRUMENT_BOUNCED",sourceId:instrument.id,actorId:req.user.id});
+        const endorsement=db.prepare("SELECT counterparty_customer_id,settlement_amount FROM instrument_movements WHERE instrument_id=? AND movement_kind='ENDORSEMENT' ORDER BY id DESC LIMIT 1").get(instrument.id) as {counterparty_customer_id:number;settlement_amount:number}|undefined;
+        if(endorsement?.counterparty_customer_id) postLedger({customerId:endorsement.counterparty_customer_id,type:"INSTRUMENT_PAYMENT_REVERSED",date:parsed.data.movementDate,description:`${instrument.number} karşılıksız; ciro ile kapatılan tedarikçi borcu yeniden açıldı`,credit:endorsement.settlement_amount*instrument.exchange_rate,currency:instrument.currency,foreignAmount:endorsement.settlement_amount,rate:instrument.exchange_rate,sourceType:"INSTRUMENT_ENDORSE_REVERSAL",sourceId:instrument.id,actorId:req.user.id});
+        if(instrument.payment_schedule_id) db.prepare("UPDATE payment_schedules SET status='PLANNED',paid_amount=0 WHERE id=?").run(instrument.payment_schedule_id);
       }
       audit(
         req.user.id,

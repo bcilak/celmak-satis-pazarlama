@@ -58,6 +58,12 @@ export function migrate() {
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
 
+    CREATE TABLE IF NOT EXISTS customer_tags (
+      customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+      tag TEXT NOT NULL CHECK(tag IN ('CUSTOMER','SUPPLIER','DEALER')),
+      PRIMARY KEY(customer_id,tag)
+    );
+
     CREATE TABLE IF NOT EXISTS products (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       code TEXT NOT NULL UNIQUE,
@@ -292,6 +298,25 @@ export function migrate() {
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
 
+    CREATE TABLE IF NOT EXISTS treasury_transactions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      instrument_id INTEGER REFERENCES negotiable_instruments(id),
+      transaction_type TEXT NOT NULL CHECK(transaction_type IN ('CHECK_COLLECTION','CHECK_DISCOUNT')),
+      transaction_date TEXT NOT NULL,
+      currency TEXT NOT NULL,
+      gross_amount REAL NOT NULL,
+      bank_amount REAL NOT NULL,
+      discount_amount REAL NOT NULL DEFAULT 0,
+      commission_amount REAL NOT NULL DEFAULT 0,
+      tax_amount REAL NOT NULL DEFAULT 0,
+      other_fee_amount REAL NOT NULL DEFAULT 0,
+      counterparty TEXT,
+      reference TEXT,
+      created_by INTEGER NOT NULL REFERENCES users(id),
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(instrument_id,transaction_type)
+    );
+
     CREATE TABLE IF NOT EXISTS reconciliations (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       customer_id INTEGER NOT NULL REFERENCES customers(id),
@@ -376,7 +401,23 @@ export function migrate() {
   addColumn('sales', 'first_due_date', 'TEXT')
   addColumn('sales', 'due_interval_days', 'INTEGER')
   addColumn('sales', 'term_installment_count', 'INTEGER NOT NULL DEFAULT 1')
+  addColumn('sales', 'approval_assignee_id', 'INTEGER REFERENCES users(id)')
   addColumn('payment_schedules', 'paid_amount', 'REAL NOT NULL DEFAULT 0')
+  addColumn('instrument_movements', 'discount_rate', 'REAL')
+  addColumn('instrument_movements', 'fee_amount', 'REAL')
+  addColumn('instrument_movements', 'net_amount', 'REAL')
+  addColumn('instrument_movements', 'commission_amount', 'REAL')
+  addColumn('instrument_movements', 'tax_amount', 'REAL')
+  addColumn('instrument_movements', 'pricing_method', 'TEXT')
+  addColumn('instrument_movements', 'annual_rate', 'REAL')
+  addColumn('instrument_movements', 'days_to_maturity', 'INTEGER')
+  addColumn('instrument_movements', 'with_recourse', 'INTEGER')
+  addColumn('instrument_movements', 'movement_kind', 'TEXT')
+  addColumn('instrument_movements', 'counterparty_customer_id', 'INTEGER REFERENCES customers(id)')
+  addColumn('instrument_movements', 'settlement_amount', 'REAL')
+  addColumn('instrument_movements', 'cash_amount', 'REAL NOT NULL DEFAULT 0')
+  addColumn('instrument_movements', 'finance_cost', 'REAL NOT NULL DEFAULT 0')
+  addColumn('instrument_movements', 'document_reference', 'TEXT')
   addColumn('users', 'password_hash', 'TEXT')
   addColumn('users', 'totp_secret', 'TEXT')
   addColumn('users', 'two_factor_enabled', 'INTEGER NOT NULL DEFAULT 0')

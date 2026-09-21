@@ -1,9 +1,12 @@
 import {
+  Fragment,
   useCallback,
   useEffect,
   useState,
+  type Dispatch,
   type FormEvent,
   type ReactNode,
+  type SetStateAction,
 } from "react";
 import {
   NavLink,
@@ -198,7 +201,7 @@ function App() {
   const can=(permission:string)=>session.currentUser.role==="ADMIN"||Boolean(session.currentUser.permissions?.includes(permission));
   const menu=[
     ["DASHBOARD","/","Ana Sayfa",<LayoutDashboard/>],
-    ["CUSTOMERS","/musteriler","Müşteriler",<Users/>],
+    ["CUSTOMERS","/musteriler","Cariler",<Users/>],
     ["SALES","/satislar","Satışlar",<ShoppingCart/>],
     ["INSTRUMENTS","/kiymetli-evrak","Kıymetli Evrak",<Landmark/>],
     ["RECEIPTS","/tahsilatlar","Cari ve Tahsilat",<CircleDollarSign/>],
@@ -242,7 +245,7 @@ function App() {
           </button>
           <div className="top-search">
             <Search />
-            <span>Müşteri, satış veya ürün ara…</span>
+            <span>Cari, satış veya ürün ara…</span>
             <kbd>⌘ K</kbd>
           </div>
           <div className="top-actions">
@@ -281,6 +284,7 @@ function App() {
               element={guard("SALES",<Sales user={session.currentUser} />)}
             />
             <Route path="/satislar/yeni" element={guard("SALES",<NewSale />)} />
+            <Route path="/satislar/:id" element={guard("SALES",<SaleDetail />)} />
             <Route
               path="/onaylar"
               element={guard("APPROVALS",<Approvals user={session.currentUser} />)}
@@ -515,12 +519,12 @@ function Customers() {
     <>
       <PageHead
         eyebrow="CARİ YÖNETİMİ"
-        title="Müşteriler"
-        description="Müşteri bakiyeleri, risk limitleri ve iletişim bilgileri."
+        title="Cariler"
+        description="Müşteri, bayi ve tedarikçi carileri; bakiye, risk ve iletişim bilgileri."
         action={
           <NavLink className="primary-btn" to="/musteriler/yeni">
             <Plus />
-            Yeni müşteri
+            Yeni cari
           </NavLink>
         }
       />
@@ -531,10 +535,10 @@ function Customers() {
             <input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Müşteri ara…"
+              placeholder="Cari ara…"
             />
           </label>
-          <span>{shown.length} müşteri</span>
+          <span>{shown.length} cari</span>
         </div>
         <div className="customer-grid">
           {shown.map((c) => (
@@ -550,6 +554,7 @@ function Customers() {
                 </span>
               </div>
               <h3>{c.name}</h3>
+              <div className="account-tags">{(c.tags||"CUSTOMER").split(",").map(tag=><span key={tag}>{({CUSTOMER:"Müşteri",SUPPLIER:"Tedarikçi",DEALER:"Bayi"} as Record<string,string>)[tag]||tag}</span>)}</div>
               <p>
                 {c.code} · {c.city}
               </p>
@@ -564,7 +569,7 @@ function Customers() {
                 </div>
               </div>
               <NavLink className="text-btn" to={`/musteriler/${c.id}`}>
-                Müşteri detayını aç <ChevronRight />
+                Cari detayını aç <ChevronRight />
               </NavLink>
             </article>
           ))}
@@ -579,6 +584,7 @@ function NewCustomer() {
   const [source, setSource] = useState("AUTO");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [tags,setTags]=useState(["CUSTOMER"]);
   const submit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setBusy(true);
@@ -592,6 +598,7 @@ function NewCustomer() {
           codeSource: source,
           paymentTermDays: Number(values.paymentTermDays),
           riskLimit: Number(values.riskLimit),
+          tags,
         }),
       });
       navigate("/musteriler");
@@ -605,8 +612,8 @@ function NewCustomer() {
     <form onSubmit={submit}>
       <PageHead
         eyebrow="YENİ CARİ KART"
-        title="Yeni müşteri"
-        description="Müşteri kodunu otomatik oluşturun veya mevcut ERP kodunu koruyun."
+        title="Yeni cari"
+        description="Bir cari aynı anda müşteri, bayi ve tedarikçi olarak işaretlenebilir."
       />
       {error && <div className="error-box">{error}</div>}
       <section className="panel customer-form">
@@ -635,6 +642,7 @@ function NewCustomer() {
             </label>
           </div>
         </div>
+        <div className="form-block"><h2>Cari türleri</h2><p className="info-note">Aynı firmaya birden fazla rol verebilirsiniz.</p><div className="tag-picker">{[["CUSTOMER","Müşteri"],["DEALER","Bayi"],["SUPPLIER","Tedarikçi"]].map(([value,label])=><label key={value} className={tags.includes(value)?"selected":""}><input type="checkbox" checked={tags.includes(value)} onChange={e=>setTags(e.target.checked?[...tags,value]:tags.length>1?tags.filter(x=>x!==value):tags)}/><span>{label}</span></label>)}</div></div>
         <div className="form-block">
           <h2>Müşteri kodu</h2>
           <div className="choice-grid code-source">
@@ -716,7 +724,7 @@ function NewCustomer() {
             Vazgeç
           </button>
           <button className="primary-btn" disabled={busy}>
-            {busy ? "Kaydediliyor…" : "Müşteriyi oluştur"}
+            {busy ? "Kaydediliyor…" : "Cariyi oluştur"}
             <ChevronRight />
           </button>
         </div>
@@ -775,6 +783,9 @@ function CustomerDetail() {
   const [data, setData] = useState<Detail | null>(null);
   const [ledger, setLedger] = useState<Ledger | null>(null);
   const [tab, setTab] = useState("overview");
+  const [openShipment,setOpenShipment]=useState<number|null>(null);
+  const [shipmentDetail,setShipmentDetail]=useState<{shipment:{deliveryAddress:string;vehiclePlate?:string;driverName?:string;dispatchNumber?:string;recipientName?:string;actualDate?:string;note?:string};items:{code:string;name:string;unit:string;quantity:number}[]}|null>(null);
+  const showShipment=async(shipmentId:number)=>{if(openShipment===shipmentId){setOpenShipment(null);return}setOpenShipment(shipmentId);setShipmentDetail(await api(`/shipments/${shipmentId}`));};
   useEffect(() => {
     Promise.all([api<Detail>(`/customers/${id}`),api<Ledger>(`/customers/${id}/ledger`)]).then(([detail,account])=>{setData(detail);setLedger(account)});
   }, [id]);
@@ -955,17 +966,17 @@ function CustomerDetail() {
               </thead>
               <tbody>
                 {data.shipments.map((x) => (
-                  <tr key={x.id}>
+                  <Fragment key={x.id}><tr className="clickable-row" onClick={()=>showShipment(x.id)}>
                     <td>
                       <b>{x.number}</b>
                     </td>
                     <td>{x.saleNumber}</td>
                     <td>{dateOnly(x.plannedDate)}</td>
                     <td>{x.totalQuantity}</td>
-                    <td>
-                      <Status value={x.status} />
-                    </td>
+                    <td><Status value={x.status} /> <button className="mini-btn">{openShipment===x.id?"Kapat":"Detayı gör"}</button></td>
                   </tr>
+                  {openShipment===x.id&&<tr className="shipment-detail-row"><td colSpan={5}>{shipmentDetail?<div className="shipment-detail-box"><div><span><small>Teslimat adresi</small><b>{shipmentDetail.shipment.deliveryAddress}</b></span><span><small>Araç / şoför</small><b>{shipmentDetail.shipment.vehiclePlate||"Atanmadı"} · {shipmentDetail.shipment.driverName||"Atanmadı"}</b></span><span><small>İrsaliye</small><b>{shipmentDetail.shipment.dispatchNumber||"Henüz düzenlenmedi"}</b></span><span><small>Teslim alan</small><b>{shipmentDetail.shipment.recipientName||"Henüz teslim edilmedi"}</b></span></div><table><thead><tr><th>Ürün</th><th>Sevk miktarı</th></tr></thead><tbody>{shipmentDetail.items.map(item=><tr key={item.code}><td><b>{item.name}</b><small>{item.code}</small></td><td>{item.quantity} {item.unit}</td></tr>)}</tbody></table></div>:"Yükleniyor…"}</td></tr>}
+                  </Fragment>
                 ))}
                 {!data.shipments.length && (
                   <tr>
@@ -1054,7 +1065,7 @@ function SaleTable({
             sales.map((s) => (
               <tr key={s.id}>
                 <td>
-                  <b>{s.number}</b>
+                  <NavLink className="sale-detail-link" to={`/satislar/${s.id}`}>{s.number}</NavLink>
                   <small>{formatDate(s.createdAt)}</small>
                 </td>
                 <td>{s.customerName}</td>
@@ -1092,7 +1103,14 @@ function SaleTable({
   );
 }
 
+function SaleDetail(){
+  type Detail={sale:{id:number;number:string;status:string;paymentMethod:string;subtotal:number;vatTotal:number;grandTotal:number;downPayment:number;currency:string;exchangeRate:number;createdAt:string;customerId:number;customerCode:string;customerName:string;createdBy:string;approvalAssignee?:string};items:{id:number;code:string;name:string;unit:string;quantity:number;unitPrice:number;vatRate:number;lineTotal:number}[];schedule:{sequenceNo:number;paymentType:string;dueDate:string;amount:number;paidAmount:number;currency:string;status:string}[];shipments:{id:number;number:string;status:string;plannedDate:string;actualDate?:string;dispatchNumber?:string}[]};
+  const{id}=useParams();const[data,setData]=useState<Detail|null>(null);useEffect(()=>{api<Detail>(`/sales/${id}/detail`).then(setData)},[id]);if(!data)return <div className="loading">Satış detayı hazırlanıyor…</div>;const s=data.sale;
+  return <><PageHead eyebrow={`${s.customerCode} · ${s.number}`} title={s.customerName} description={`${formatDate(s.createdAt)} tarihinde ${s.createdBy} tarafından oluşturuldu.`}/><div className="sale-detail-grid"><section className="panel"><PanelTitle title="Satılan ürünler"/><div className="table-wrap"><table><thead><tr><th>Ürün</th><th>Miktar</th><th>Birim fiyat</th><th>KDV</th><th>Satır toplamı</th></tr></thead><tbody>{data.items.map(x=><tr key={x.id}><td><b>{x.name}</b><small>{x.code}</small></td><td>{x.quantity} {x.unit}</td><td>{money(x.unitPrice,s.currency)}</td><td>%{x.vatRate}</td><td className="amount">{money(x.lineTotal,s.currency)}</td></tr>)}</tbody></table></div></section><aside className="panel sale-financial-summary"><PanelTitle title="Finansal özet"/><p><span>Ara toplam</span><b>{money(s.subtotal,s.currency)}</b></p><p><span>KDV</span><b>{money(s.vatTotal,s.currency)}</b></p><p className="grand"><span>Genel toplam</span><b>{money(s.grandTotal,s.currency)}</b></p><p><span>Peşinat</span><b>{money(s.downPayment,s.currency)}</b></p><p><span>Ödeme şekli</span><b>{paymentTypeLabel(s.paymentMethod)}</b></p><p><span>Onay yetkilisi</span><b>{s.approvalAssignee||"Belirlenmedi"}</b></p><Status value={s.status}/></aside></div><section className="panel sale-schedule"><PanelTitle title="Ödeme ve vade planı"/><div className="compact-list">{data.schedule.map(x=><div key={x.sequenceNo}><span><b>{x.sequenceNo}. ödeme · {paymentTypeLabel(x.paymentType)}</b><small>{dateOnly(x.dueDate)}</small></span><strong>{money(x.amount,x.currency)}<small>{x.paidAmount?`${money(x.paidAmount,x.currency)} ödendi`:"Ödeme bekleniyor"}</small></strong><Status value={x.status}/></div>)}</div></section></>;
+}
+
 function NewSale() {
+  type Assignee={id:number;name:string;email:string};
   type Config = {
     rates: {
       currency: string;
@@ -1105,10 +1123,12 @@ function NewSale() {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
   const [config, setConfig] = useState<Config>({ rates: [] });
+  const [assignees,setAssignees]=useState<Assignee[]>([]);
+  const [approvalAssigneeId,setApprovalAssigneeId]=useState(0);
   const [customerId, setCustomerId] = useState(0);
-  const [lines, setLines] = useState<{ productId: number; quantity: number }[]>(
-    [],
-  );
+  const [lines, setLines] = useState<
+    { productId: number; quantity: number; unitPrice: number; vatRate: number }[]
+  >([]);
   const [payment, setPayment] = useState("TERM");
   const [down, setDown] = useState(0);
   const [currency, setCurrency] = useState("TRY");
@@ -1116,8 +1136,9 @@ function NewSale() {
   const [instrumentType, setInstrumentType] = useState("CHECK");
   const [instrumentCount, setInstrumentCount] = useState(1);
   const [termInstallmentCount, setTermInstallmentCount] = useState(1);
-  const [firstDueDate, setFirstDueDate] = useState(addDaysToToday(30));
-  const [dueIntervalDays, setDueIntervalDays] = useState(30);
+  const [paymentSchedule, setPaymentSchedule] = useState([
+    { dueDate: addDaysToToday(30), amount: 0 },
+  ]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   useEffect(() => {
@@ -1125,10 +1146,12 @@ function NewSale() {
       api<Customer[]>("/customers"),
       api<Product[]>("/products"),
       api<Config>("/configuration"),
-    ]).then(([c, p, conf]) => {
+      api<Assignee[]>("/approval-assignees"),
+    ]).then(([c, p, conf, approvers]) => {
       setCustomers(c);
       setProducts(p);
       setConfig(conf);
+      setAssignees(approvers);setApprovalAssigneeId(approvers[0]?.id||0);
     });
   }, []);
   const customer = customers.find((c) => c.id === customerId);
@@ -1140,25 +1163,40 @@ function NewSale() {
     .filter((x) => x.product);
   const convertedPrice = (product: Product) =>
     currency === "TRY" ? product.unitPrice : product.unitPrice / exchangeRate;
-  const subtotal = detail.reduce(
-    (s, l) => s + convertedPrice(l.product) * l.quantity,
-    0,
-  );
+  const subtotal = detail.reduce((s, l) => s + l.unitPrice * l.quantity, 0);
   const total = detail.reduce(
     (s, l) =>
-      s +
-      convertedPrice(l.product) * l.quantity * (1 + l.product.vatRate / 100),
+      s + l.unitPrice * l.quantity * (1 + l.vatRate / 100),
     0,
   );
-  const addProduct = (id: number) =>
+  const addProduct = (id: number) => {
+    const selectedProduct = products.find((p) => p.id === id)!;
+    if (!lines.length) {
+      const initialPrice = convertedPrice(selectedProduct);
+      setPaymentSchedule((current) => [{
+        ...current[0],
+        amount: Number((initialPrice * (1 + selectedProduct.vatRate / 100)).toFixed(2)),
+      }]);
+    }
     setLines((v) => {
       const found = v.find((x) => x.productId === id);
       return found
         ? v.map((x) =>
             x.productId === id ? { ...x, quantity: x.quantity + 1 } : x,
           )
-        : [...v, { productId: id, quantity: 1 }];
+        : [
+            ...v,
+            {
+              productId: id,
+              quantity: 1,
+              unitPrice: Number(
+                convertedPrice(selectedProduct).toFixed(4),
+              ),
+              vatRate: 10,
+            },
+          ];
     });
+  };
   const changeCurrency = (value: string) => {
     setCurrency(value);
     setExchangeRate(
@@ -1167,6 +1205,22 @@ function NewSale() {
         : config.rates.find((r) => r.currency === value)?.rate || 1,
     );
   };
+  const rebuildSchedule = (count: number) => {
+    const safeCount = Math.max(1, Math.min(24, count));
+    const remaining = Math.max(0, total - down);
+    const base = Math.floor((remaining / safeCount) * 100) / 100;
+    setPaymentSchedule(
+      Array.from({ length: safeCount }, (_, index) => ({
+        dueDate:
+          paymentSchedule[index]?.dueDate || addDaysToToday(30 * (index + 1)),
+        amount:
+          index === safeCount - 1
+            ? Number((remaining - base * index).toFixed(2))
+            : base,
+      })),
+    );
+  };
+  const planTotal = paymentSchedule.reduce((sum, row) => sum + row.amount, 0);
   const save = async (e: FormEvent) => {
     e.preventDefault();
     setError("");
@@ -1181,6 +1235,7 @@ function NewSale() {
           downPayment: down,
           currency,
           exchangeRate,
+          approvalAssigneeId:approvalAssigneeId||undefined,
           termInstallmentCount,
           instrumentType: ["CHECK", "MIXED"].includes(payment)
             ? instrumentType
@@ -1188,11 +1243,8 @@ function NewSale() {
           instrumentCount: ["CHECK", "MIXED"].includes(payment)
             ? instrumentCount
             : 0,
-          firstDueDate: ["CHECK", "MIXED", "TERM"].includes(payment)
-            ? firstDueDate
-            : undefined,
-          dueIntervalDays: ["CHECK", "MIXED", "TERM"].includes(payment)
-            ? dueIntervalDays
+          paymentSchedule: ["CHECK", "MIXED", "TERM"].includes(payment)
+            ? paymentSchedule
             : undefined,
           note: "",
           items: lines,
@@ -1210,7 +1262,7 @@ function NewSale() {
       <PageHead
         eyebrow="YENİ İŞLEM"
         title="Yeni satış oluştur"
-        description="Müşteriyi ve ürünleri seçin; fiyat, KDV ve vade otomatik hesaplansın."
+        description="Müşteriyi ve ürünleri seçin; satış fiyatını ve esnek vade planını belirleyin."
       />
       <div className="stepper">
         <span className="active">
@@ -1271,8 +1323,8 @@ function NewSale() {
             <div className="section-content">
               <h2>Ürünleri ekleyin</h2>
               <p>
-                Ürün kartındaki TL baz fiyat, seçilen işlem kuruyla otomatik
-                dönüştürülür.
+                Ürün kartındaki fiyat başlangıç değeri olarak gelir; bu satışa
+                özel birim fiyatı elle değiştirebilirsiniz.
               </p>
               <div className="product-picker">
                 {products.map((p) => (
@@ -1301,8 +1353,7 @@ function NewSale() {
                       <span>
                         <b>{l.product.name}</b>
                         <small>
-                          {money(convertedPrice(l.product), currency)} · %
-                          {l.product.vatRate} KDV
+                          {l.product.code}
                         </small>
                       </span>
                       <label>
@@ -1345,11 +1396,48 @@ function NewSale() {
                           +
                         </button>
                       </label>
+                      <label className="field line-field">
+                        <span>Birim fiyat ({currency})</span>
+                        <input
+                          type="number"
+                          required
+                          min="0.01"
+                          step="0.01"
+                          value={l.unitPrice}
+                          onChange={(e) =>
+                            setLines((v) =>
+                              v.map((x) =>
+                                x.productId === l.productId
+                                  ? { ...x, unitPrice: Number(e.target.value) }
+                                  : x,
+                              ),
+                            )
+                          }
+                        />
+                      </label>
+                      <label className="field line-field vat-field">
+                        <span>KDV oranı (%)</span>
+                        <input
+                          type="number"
+                          required
+                          min="0"
+                          max="100"
+                          step="0.01"
+                          value={l.vatRate}
+                          onChange={(e) =>
+                            setLines((v) =>
+                              v.map((x) =>
+                                x.productId === l.productId
+                                  ? { ...x, vatRate: Number(e.target.value) }
+                                  : x,
+                              ),
+                            )
+                          }
+                        />
+                      </label>
                       <strong>
                         {money(
-                          convertedPrice(l.product) *
-                            l.quantity *
-                            (1 + l.product.vatRate / 100),
+                          l.unitPrice * l.quantity * (1 + l.vatRate / 100),
                           currency,
                         )}
                       </strong>
@@ -1432,55 +1520,30 @@ function NewSale() {
                         min="1"
                         max="24"
                         value={termInstallmentCount}
-                        onChange={(e) =>
-                          setTermInstallmentCount(Number(e.target.value))
-                        }
+                        onChange={(e) => { const count=Number(e.target.value); setTermInstallmentCount(count); rebuildSchedule(count); }}
                       />
                     </label>
-                    <label className="field">
-                      <span>İlk vade</span>
-                      <input
-                        type="date"
-                        value={firstDueDate}
-                        onChange={(e) => setFirstDueDate(e.target.value)}
-                      />
-                    </label>
-                    <label className="field">
-                      <span>Vade aralığı</span>
-                      <select
-                        value={dueIntervalDays}
-                        onChange={(e) =>
-                          setDueIntervalDays(Number(e.target.value))
-                        }
-                      >
-                        <option value="15">15 gün</option>
-                        <option value="30">30 gün</option>
-                        <option value="45">45 gün</option>
-                        <option value="60">60 gün</option>
-                        <option value="90">90 gün</option>
-                      </select>
-                    </label>
+                    <button type="button" className="mini-btn" onClick={() => rebuildSchedule(termInstallmentCount)}>Tutarları eşit dağıt</button>
                   </div>
-                  <PaymentPreview
-                    count={termInstallmentCount}
-                    firstDate={firstDueDate}
-                    interval={dueIntervalDays}
+                  <EditablePaymentPlan
+                    rows={paymentSchedule}
+                    setRows={setPaymentSchedule}
                     total={total - down}
                     currency={currency}
                   />
                 </>
               )}
               {payment === "MIXED" && (
-                <label className="field compact">
+                <><label className="field compact">
                   <span>Peşinat tutarı</span>
                   <input
                     type="number"
                     min="0"
                     max={total}
-                    value={down}
+                      value={down}
                     onChange={(e) => setDown(Number(e.target.value))}
                   />
-                </label>
+                </label>{down>total&&<div className="error-box inline-warning">Peşinat genel toplamdan büyük olamaz. En fazla {money(total,currency)} girebilirsiniz.</div>}</>
               )}
               {["CHECK", "MIXED"].includes(payment) && (
                 <div className="instrument-plan">
@@ -1501,45 +1564,21 @@ function NewSale() {
                       min="1"
                       max="24"
                       value={instrumentCount}
-                      onChange={(e) =>
-                        setInstrumentCount(Number(e.target.value))
-                      }
-                    />
+                      onChange={(e) => { const count=Number(e.target.value); setInstrumentCount(count); rebuildSchedule(count); }}
+                      />
                   </label>
-                  <label className="field">
-                    <span>İlk vade</span>
-                    <input
-                      type="date"
-                      value={firstDueDate}
-                      onChange={(e) => setFirstDueDate(e.target.value)}
-                    />
-                  </label>
-                  <label className="field">
-                    <span>Vade aralığı</span>
-                    <select
-                      value={dueIntervalDays}
-                      onChange={(e) =>
-                        setDueIntervalDays(Number(e.target.value))
-                      }
-                    >
-                      <option value="15">15 gün</option>
-                      <option value="30">30 gün</option>
-                      <option value="45">45 gün</option>
-                      <option value="60">60 gün</option>
-                      <option value="90">90 gün</option>
-                    </select>
-                  </label>
+                  <button type="button" className="mini-btn" onClick={() => rebuildSchedule(instrumentCount)}>Tutarları eşit dağıt</button>
                 </div>
               )}{" "}
               {["CHECK", "MIXED"].includes(payment) && (
-                <PaymentPreview
-                  count={instrumentCount}
-                  firstDate={firstDueDate}
-                  interval={dueIntervalDays}
+                <EditablePaymentPlan
+                  rows={paymentSchedule}
+                  setRows={setPaymentSchedule}
                   total={total - down}
                   currency={currency}
                 />
               )}
+              <label className="field approval-picker"><span>Onaya gönderilecek yetkili</span><select required value={approvalAssigneeId} onChange={e=>setApprovalAssigneeId(Number(e.target.value))}><option value="">Yetkili seçin…</option>{assignees.map(x=><option key={x.id} value={x.id}>{x.name} · {x.email}</option>)}</select><small>Satış hazır olduğunda onay görevi seçtiğiniz yöneticiye gönderilir.</small></label>
             </div>
           </section>
         </div>
@@ -1574,7 +1613,7 @@ function NewSale() {
           )}
           <button
             className="primary-btn full"
-            disabled={busy || !customerId || !lines.length}
+            disabled={busy || !customerId || !lines.length || !approvalAssigneeId || down>total || (["TERM","CHECK","MIXED"].includes(payment) && Math.abs(planTotal-(total-down))>0.01)}
           >
             {busy ? "Kaydediliyor…" : "Taslağı oluştur"}
             <ChevronRight />
@@ -1589,34 +1628,30 @@ function NewSale() {
   );
 }
 
-function PaymentPreview({
-  count,
-  firstDate,
-  interval,
+function EditablePaymentPlan({
+  rows,
+  setRows,
   total,
   currency,
 }: {
-  count: number;
-  firstDate: string;
-  interval: number;
+  rows: { dueDate: string; amount: number }[];
+  setRows: Dispatch<SetStateAction<{ dueDate: string; amount: number }[]>>;
   total: number;
   currency: string;
 }) {
-  const safeCount = Math.max(1, count);
-  const base = Math.floor((total / safeCount) * 100) / 100;
+  const entered = rows.reduce((sum, row) => sum + row.amount, 0);
+  const valid = Math.abs(entered - total) <= 0.01;
   return (
     <div className="payment-preview">
-      <b>Otomatik vade planı</b>
-      {Array.from({ length: safeCount }, (_, index) => {
-        const amount = index === safeCount - 1 ? total - base * index : base;
-        return (
+      <b>Her vade tarihini ve tutarını ayrı ayrı belirleyin</b>
+      {rows.map((row, index) => (
           <span key={index}>
             <i>{index + 1}</i>
-            <time>{addDaysToDate(firstDate, interval * index)}</time>
-            <strong>{money(amount, currency)}</strong>
+            <input type="date" value={row.dueDate} onChange={(e)=>setRows((current)=>current.map((x,i)=>i===index?{...x,dueDate:e.target.value}:x))}/>
+            <input type="number" min="0.01" step="0.01" value={row.amount} onChange={(e)=>setRows((current)=>current.map((x,i)=>i===index?{...x,amount:Number(e.target.value)}:x))}/>
           </span>
-        );
-      })}
+      ))}
+      <div className={valid?"plan-total valid":"plan-total invalid"}><span>Plan toplamı</span><b>{money(entered,currency)} / {money(total,currency)}</b></div>
     </div>
   );
 }
@@ -1626,12 +1661,6 @@ function addDaysToToday(days: number) {
   date.setDate(date.getDate() + days);
   return date.toISOString().slice(0, 10);
 }
-function addDaysToDate(value: string, days: number) {
-  const date = new Date(`${value}T12:00:00`);
-  date.setDate(date.getDate() + days);
-  return new Intl.DateTimeFormat("tr-TR", { dateStyle: "medium" }).format(date);
-}
-
 function Approvals({ user }: { user: User }) {
   const [items, setItems] = useState<Approval[]>([]);
   const [message, setMessage] = useState("");
@@ -1815,6 +1844,8 @@ function Receipts({ user }: { user: User }) {
   const [receiptMode,setReceiptMode]=useState<"SCHEDULE"|"INSTRUMENT"|"GENERAL">("SCHEDULE");
   const [scheduleId,setScheduleId]=useState(0);
   const [receiptAmount,setReceiptAmount]=useState("");
+  const [receiptMethod,setReceiptMethod]=useState("BANK_TRANSFER");
+  const [generalCheck,setGeneralCheck]=useState({issuer:"",serialNumber:"",bankName:"",issueDate:new Date().toISOString().slice(0,10),dueDate:addDaysToToday(30)});
   useEffect(() => {
     api<Customer[]>("/customers").then(setCustomers);
   }, []);
@@ -1831,12 +1862,12 @@ function Receipts({ user }: { user: User }) {
     const values = Object.fromEntries(new FormData(e.currentTarget));
     try {
       const selected=ledger?.schedules.find(x=>x.id===scheduleId);
-      const result = receiptMode==="INSTRUMENT"&&selected?.instrumentId?await api<{message:string}>(`/instruments/${selected.instrumentId}/movements`,{method:"POST",body:JSON.stringify({status:"COLLECTED",movementDate:values.receiptDate,exchangeRate:currency==="TRY"?1:rate})}):await api<{ message: string }>("/receipts", {
+      const result = receiptMode==="INSTRUMENT"&&selected?.instrumentId?await api<{message:string}>(`/instruments/${selected.instrumentId}/movements`,{method:"POST",body:JSON.stringify({status:"COLLECTED",movementDate:values.receiptDate,exchangeRate:currency==="TRY"?1:rate})}):receiptMode==="GENERAL"&&receiptMethod==="CHECK"?await api<{message:string}>("/instruments/intake",{method:"POST",body:JSON.stringify({customerId,amount:Number(receiptAmount),currency,exchangeRate:rate,...generalCheck,note:values.note})}):await api<{ message: string }>("/receipts", {
         method: "POST",
         body: JSON.stringify({
           customerId,
           paymentScheduleId:receiptMode==="SCHEDULE"?scheduleId:undefined,
-          method: values.method,
+          method: receiptMethod,
           receiptDate: values.receiptDate,
           amount: Number(receiptAmount),
           currency,
@@ -1974,11 +2005,20 @@ function Receipts({ user }: { user: User }) {
               {receiptMode!=="GENERAL"?<div className="receipt-context">{selectedSchedule?<><small>{receiptMode==="INSTRUMENT"?"TAHSİL EDİLEN EVRAK":"TAHSİL EDİLEN VADE"}</small><b>{selectedSchedule.saleNumber} · {dateOnly(selectedSchedule.dueDate)}</b><span>Kalan: {money(selectedSchedule.remainingAmount,selectedSchedule.currency)}</span>{instrumentIncomplete&&<><span className="danger-text">Tahsilattan önce keşideci/borçlu, seri no ve banka bilgisi tamamlanmalıdır.</span><NavLink className="mini-btn" to="/kiymetli-evrak">Kıymetli Evrakta tamamla</NavLink></>}</>:<p>Yukarıdaki açık vadelerden birini seçin.</p>}</div>:<div className="receipt-context general"><b>Genel cari ödemesi</b><span>Bu ödeme belirli bir taksiti kapatmaz; yalnızca toplam müşteri borcundan düşer.</span></div>}
               {receiptMode!=="INSTRUMENT"&&<label className="field">
                 <span>Yöntem</span>
-                <select name="method">
+                <select name="method" value={receiptMethod} onChange={e=>setReceiptMethod(e.target.value)}>
                   <option value="BANK_TRANSFER">Havale / EFT</option>
                   <option value="CASH">Nakit</option>
+                  <option value="CHECK">Çek</option>
                 </select>
               </label>}
+              {receiptMode==="GENERAL"&&receiptMethod==="CHECK"&&<div className="check-intake-fields">
+                <div className="info-note"><b>Fiziksel çek teslim alınıyor</b><br/>Çek portföye girer ve müşteri carisi çek tutarı kadar azalır. Banka bakiyesi ancak çek tahsil edilince veya kırdırılınca artar.</div>
+                <label className="field"><span>Keşideci</span><input required value={generalCheck.issuer} onChange={e=>setGeneralCheck({...generalCheck,issuer:e.target.value})}/></label>
+                <label className="field"><span>Seri / çek no</span><input required value={generalCheck.serialNumber} onChange={e=>setGeneralCheck({...generalCheck,serialNumber:e.target.value})}/></label>
+                <label className="field"><span>Banka</span><input required value={generalCheck.bankName} onChange={e=>setGeneralCheck({...generalCheck,bankName:e.target.value})}/></label>
+                <label className="field"><span>Düzenleme tarihi</span><input required type="date" value={generalCheck.issueDate} onChange={e=>setGeneralCheck({...generalCheck,issueDate:e.target.value})}/></label>
+                <label className="field"><span>Çek vadesi</span><input required type="date" value={generalCheck.dueDate} onChange={e=>setGeneralCheck({...generalCheck,dueDate:e.target.value})}/></label>
+              </div>}
               <div className="currency-row">
                 <label className="field">
                   <span>Para birimi</span>
@@ -2019,7 +2059,7 @@ function Receipts({ user }: { user: User }) {
                     onChange={e=>setReceiptAmount(e.target.value)}
                 />
               </label>
-              <label className="field">
+              {!(receiptMode==="GENERAL"&&receiptMethod==="CHECK")&&<label className="field">
                 <span>Tahsilat tarihi</span>
                 <input
                   required
@@ -2027,17 +2067,17 @@ function Receipts({ user }: { user: User }) {
                   type="date"
                   defaultValue={new Date().toISOString().slice(0, 10)}
                 />
-              </label>
-              <label className="field">
+              </label>}
+              {!(receiptMode==="GENERAL"&&receiptMethod==="CHECK")&&<label className="field">
                 <span>Dekont / referans</span>
                 <input name="reference" />
-              </label>
+              </label>}
               <label className="field">
                 <span>Not</span>
                 <input name="note" />
               </label>
               <button className="primary-btn full" disabled={!receiptAmount||(receiptMode!=="GENERAL"&&!scheduleId)||!!instrumentIncomplete}>
-                {receiptMode==="INSTRUMENT"?"Evrakı tahsil et":receiptMode==="SCHEDULE"?"Seçili vadeye tahsilat işle":"Genel tahsilatı cariye işle"}
+                {receiptMode==="INSTRUMENT"?"Evrakı tahsil et":receiptMode==="SCHEDULE"?"Seçili vadeye tahsilat işle":receiptMethod==="CHECK"?"Çeki portföye al ve cariden düş":"Genel tahsilatı cariye işle"}
               </button>
             </form>
           )}
@@ -2180,7 +2220,8 @@ function Shipments({ user }: { user: User }) {
                 </span>
                 <span>
                   <small>İrsaliye</small>
-                  <b>{item.dispatchNumber || "Bekliyor"}</b>
+                  <b title="Ürün sevke çıkarken düzenlenecek sevk irsaliyesinin numarasıdır.">{item.dispatchNumber || "Henüz düzenlenmedi"}</b>
+                  {!item.dispatchNumber&&<small>Sevke çıkışta numara girilecek</small>}
                 </span>
               </div>
               {["ADMIN", "SHIPPING"].includes(user.role) &&
@@ -2516,11 +2557,16 @@ function Instruments({ user }: { user: User }) {
     issueDate: string;
   };
   type Collection = { date: string; rate: number };
+  type Discount = { company: string; rate: number; pricingMethod:"DIRECT"|"ANNUAL"; commission:number; tax:number; fee: number; withRecourse:boolean; date: string; note: string };
+  type Endorsement = { counterpartyCustomerId:number; settlementAmount:number; date:string; reference:string; note:string };
   type Config = { rates: { currency: string; rate: number }[] };
   const [items, setItems] = useState<Instrument[]>([]);
+  const [customers,setCustomers]=useState<Customer[]>([]);
   const [message, setMessage] = useState("");
   const [filter, setFilter] = useState("ACTION");
   const [openId,setOpenId]=useState<number|null>(null);
+  const [activeAction,setActiveAction]=useState<Record<number,"COLLECT"|"DISCOUNT"|"ENDORSE"|"OTHER"|null>>({});
+  const [helpOpen,setHelpOpen]=useState(true);
   const [states, setStates] = useState<Record<number, string>>({});
   const [counterparties, setCounterparties] = useState<Record<number, string>>(
     {},
@@ -2529,14 +2575,18 @@ function Instruments({ user }: { user: User }) {
   const [collections, setCollections] = useState<Record<number, Collection>>(
     {},
   );
+  const [discounts, setDiscounts] = useState<Record<number, Discount>>({});
+  const [endorsements,setEndorsements]=useState<Record<number,Endorsement>>({});
   const allowed = ["ADMIN", "ACCOUNTING", "AUDITOR"].includes(user.role);
   const load = useCallback(() => {
     if (allowed)
       Promise.all([
         api<Instrument[]>("/instruments"),
         api<Config>("/configuration"),
-      ]).then(([rows, config]) => {
+        api<Customer[]>("/customers"),
+      ]).then(([rows, config, customerRows]) => {
         setItems(rows);
+        setCustomers(customerRows);
         setDetails(
           Object.fromEntries(
             rows.map((x) => [
@@ -2565,6 +2615,8 @@ function Instruments({ user }: { user: User }) {
             ]),
           ),
         );
+        setDiscounts((current) => Object.fromEntries(rows.map((x) => [x.id, current[x.id] || { company: "", rate: 0, pricingMethod:"ANNUAL", commission:0, tax:0, fee: 0, withRecourse:true, date: new Date().toISOString().slice(0,10), note: "" }])));
+        setEndorsements((current)=>Object.fromEntries(rows.map((x)=>[x.id,current[x.id]||{counterpartyCustomerId:0,settlementAmount:x.amount,date:new Date().toISOString().slice(0,10),reference:"",note:""}])));
       });
   }, [allowed]);
   useEffect(() => {
@@ -2614,20 +2666,39 @@ function Instruments({ user }: { user: User }) {
       setMessage((e as Error).message);
     }
   };
+  const discount = async (item: Instrument) => {
+    const value=discounts[item.id];
+    if(!value?.company) return setMessage("Çekin kırdırıldığı banka veya finansman firmasını yazın.");
+    try {
+      const result=await api<{message:string}>(`/instruments/${item.id}/discount`,{method:"POST",body:JSON.stringify({company:value.company,discountRate:value.rate,pricingMethod:value.pricingMethod,commissionAmount:value.commission,taxAmount:value.tax,feeAmount:value.fee,withRecourse:value.withRecourse,transactionDate:value.date,note:value.note})});
+      setMessage(result.message); load();
+    } catch(e){setMessage((e as Error).message)}
+  };
+  const endorse = async (item:Instrument) => {
+    const value=endorsements[item.id];
+    if(!value?.counterpartyCustomerId) return setMessage("Çekin verileceği tedarikçi carisini seçin.");
+    if(!value.reference.trim()) return setMessage("Kapatılacak alış faturası veya borç referansını yazın.");
+    try {
+      const result=await api<{message:string}>(`/instruments/${item.id}/endorse`,{method:"POST",body:JSON.stringify({counterpartyCustomerId:value.counterpartyCustomerId,settlementAmount:value.settlementAmount,transactionDate:value.date,documentReference:value.reference,note:value.note||undefined})});
+      setMessage(result.message); load();
+    } catch(e){setMessage((e as Error).message)}
+  };
   const shown = items.filter(
     (x) =>
       filter === "ALL" ||
       (filter === "ACTION" && !["COLLECTED","CANCELLED","ENDORSED","ASSIGNED"].includes(x.status) && (x.daysToDue<=7 || !x.issuer || !x.serialNumber || (x.instrumentType==="CHECK"&&!x.bankName))) ||
       (filter === "DUE" &&
         x.daysToDue === 0 &&
-        !["COLLECTED", "CANCELLED"].includes(x.status)) ||
+        !["COLLECTED", "CANCELLED", "ENDORSED", "ASSIGNED"].includes(x.status)) ||
       (filter === "OVERDUE" &&
         x.daysToDue < 0 &&
-        !["COLLECTED", "CANCELLED"].includes(x.status)) ||
+        !["COLLECTED", "CANCELLED", "ENDORSED", "ASSIGNED"].includes(x.status)) ||
       (filter === "UPCOMING" &&
         x.daysToDue > 0 &&
-        !["COLLECTED", "CANCELLED"].includes(x.status)) ||
-      (filter === "COLLECTED" && x.status === "COLLECTED"),
+        !["COLLECTED", "CANCELLED", "ENDORSED", "ASSIGNED"].includes(x.status)) ||
+      (filter === "COLLECTED" && x.status === "COLLECTED") ||
+      (filter === "DISCOUNTED" && !!x.discountCompany) ||
+      (filter === "ENDORSED" && !!x.endorsementCompany),
   );
   if (!allowed)
     return (
@@ -2641,9 +2712,11 @@ function Instruments({ user }: { user: User }) {
       <PageHead
         eyebrow="ÇEK VE SENET"
         title="Kıymetli evrak"
-        description="Önce işlem isteyen evrakları görün; ayrıntıları yalnızca gerektiğinde açın."
+        description="Çekin teslim alınmasından tahsil, kırdırma veya karşılıksız sonucuna kadar tüm hareketlerini yönetin."
       />
       {message && <Toast text={message} close={() => setMessage("")} />}
+      <section className="instrument-welcome panel"><div><span className="eyebrow">BU EKRANDA NE YAPACAĞIM?</span><h2>Önce çeki bulun, sonra size gösterilen sıradaki adımı uygulayın.</h2><p>Teknik terimleri bilmeniz gerekmez. Kartı açtığınızda yalnızca o çek için yapılabilecek işlemler gösterilir.</p></div><button className="mini-btn" onClick={()=>setHelpOpen(!helpOpen)}>{helpOpen?"Açıklamayı gizle":"Nasıl kullanılır?"}</button></section>
+      {helpOpen&&<section className="instrument-simple-flow"><div><i>1</i><span><b>Bilgileri tamamla</b><small>Keşideci, banka ve çek numarasını yazın.</small></span></div><div><i>2</i><span><b>Teslim aldım</b><small>Fiziksel çek elinize geçtiğinde portföye alın.</small></span></div><div><i>3</i><span><b>Sonucu seç</b><small>Tahsil edildi, kırdırıldı veya karşılıksız çıktı.</small></span></div></section>}
       <div className="instrument-stats">
         <Metric
           icon={<FileClock />}
@@ -2653,7 +2726,7 @@ function Instruments({ user }: { user: User }) {
             items.filter(
               (x) =>
                 x.daysToDue === 0 &&
-                !["COLLECTED", "CANCELLED"].includes(x.status),
+                !["COLLECTED", "CANCELLED", "ENDORSED", "ASSIGNED"].includes(x.status),
             ).length,
           )}
           note="Tahsilat bekliyor"
@@ -2664,7 +2737,7 @@ function Instruments({ user }: { user: User }) {
           label="Açık portföy"
           value={money(
             items
-              .filter((x) => !["COLLECTED", "CANCELLED"].includes(x.status))
+              .filter((x) => !["COLLECTED", "CANCELLED", "ENDORSED", "ASSIGNED"].includes(x.status))
               .reduce((s, x) => s + x.tryAmount, 0),
           )}
           note="TL karşılığı"
@@ -2677,20 +2750,27 @@ function Instruments({ user }: { user: User }) {
             items.filter(
               (x) =>
                 x.daysToDue < 0 &&
-                !["COLLECTED", "CANCELLED"].includes(x.status),
+                !["COLLECTED", "CANCELLED", "ENDORSED", "ASSIGNED"].includes(x.status),
             ).length,
           )}
           note="İşlem gerekiyor"
         />
       </div>
+      <section className="instrument-money-separation panel">
+        <div><small>Ciro ile kapatılan tedarikçi borcu</small><b>{money(items.reduce((sum,x)=>sum+(x.endorsementAmount||0)*x.exchangeRate,0))}</b><span>Nakit hareketi değildir</span></div>
+        <div><small>Kırdırmadan bankaya geçen net nakit</small><b>{money(items.reduce((sum,x)=>sum+(x.discountCashAmount||0)*x.exchangeRate,0))}</b><span>Gerçek para girişi</span></div>
+        <div><small>Toplam çek finansman maliyeti</small><b>{money(items.reduce((sum,x)=>sum+(x.discountFinanceCost||0)*x.exchangeRate,0))}</b><span>İskonto + komisyon + vergi + masraf</span></div>
+      </section>
       <div className="filter-tabs">
         {[
-          ["ACTION", "İşlem gerekenler"],
-          ["DUE", "Bugün"],
-          ["OVERDUE", "Geciken"],
-          ["UPCOMING", "Yaklaşan"],
-          ["COLLECTED", "Tahsil edilen"],
-          ["ALL", "Tümü"],
+          ["ACTION", "Benim işlem yapacaklarım"],
+          ["DUE", "Bugün vadesi gelen"],
+          ["OVERDUE", "Vadesi geçen"],
+          ["UPCOMING", "İleride vadesi gelecek"],
+          ["COLLECTED", "Tamamlanan tahsilatlar"],
+          ["DISCOUNTED", "Kırdırılan çekler"],
+          ["ENDORSED", "Ciro edilen çekler"],
+          ["ALL", "Bütün evraklar"],
         ].map(([v, l]) => (
           <button
             className={filter === v ? "active" : ""}
@@ -2714,6 +2794,11 @@ function Instruments({ user }: { user: User }) {
             !item.serialNumber ||
             (item.instrumentType === "CHECK" && !item.bankName);
           const expanded=openId===item.id;
+          const discountValue=discounts[item.id];
+          const discountDays=discountValue?Math.max(0,Math.ceil((new Date(`${item.dueDate}T12:00:00`).getTime()-new Date(`${discountValue.date}T12:00:00`).getTime())/86400000)):0;
+          const discountCut=discountValue?item.amount*discountValue.rate/100*(discountValue.pricingMethod==="ANNUAL"?discountDays/360:1):0;
+          const discountNet=Math.max(0,item.amount-discountCut-(discountValue?.commission||0)-(discountValue?.tax||0)-(discountValue?.fee||0));
+          const nextStep=incomplete?"Önce çek bilgilerini tamamlayın":item.status==="PLANNED"?"Fiziksel çek elinize geçtiyse teslim alındı olarak işaretleyin":item.status==="IN_PORTFOLIO"?"Çek elinizde: tahsilat, bankaya verme, ciro veya kırdırma işlemini seçin":item.status==="GIVEN_TO_BANK"?"Çek bankada: tahsil edildi veya karşılıksız sonucunu kaydedin":item.status==="ENDORSED"?"Ciro tamamlandı; tedarikçi borcu kapatıldı, nakit ve maliyet değişmedi":item.discountCompany?"Kırdırma tamamlandı; net nakit ve finansman maliyeti kaydedildi":["COLLECTED","ASSIGNED","CANCELLED"].includes(item.status)?"Bu evrak için işlem tamamlandı":"Evrakın güncel sonucunu kaydedin";
           return (
             <article
               className={`instrument-card ${item.daysToDue < 0 ? "overdue" : ""}`}
@@ -2747,16 +2832,17 @@ function Instruments({ user }: { user: User }) {
                       dateStyle: "medium",
                     }).format(new Date(item.dueDate + "T12:00:00"))}
                   </strong>
-                  <Status value={item.status} />
-                  <button className="instrument-toggle" onClick={()=>setOpenId(expanded?null:item.id)}>{expanded?"Kapat":item.status==="COLLECTED"?"Detayı gör":"İşlem yap"}</button>
+                  <Status value={item.discountCompany ? "DISCOUNTED" : item.status} />
+                  <button className="instrument-toggle" onClick={()=>setOpenId(expanded?null:item.id)}>{expanded?"Kartı kapat":item.status==="COLLECTED"?"Sonucu gör":"Aç ve devam et"}</button>
                 </div>
               </div>
+              <div className="instrument-next-step"><span>SIRADAKİ ADIM</span><b>{nextStep}</b></div>
               {!expanded&&incomplete&&<div className="instrument-warning">Evrak bilgileri eksik · işlem için tamamlayın</div>}
               {incomplete && expanded && (
                 <div className="detail-editor">
                   <b>Evrak bilgilerini tamamlayın</b>
                   <div>
-                    <input
+                    <label><small>{item.instrumentType === "CHECK" ? "Çeki düzenleyen kişi/firma (keşideci)" : "Senedi düzenleyen borçlu"}</small><input
                       placeholder={
                         item.instrumentType === "CHECK" ? "Keşideci" : "Borçlu"
                       }
@@ -2767,8 +2853,8 @@ function Instruments({ user }: { user: User }) {
                           [item.id]: { ...detail, issuer: e.target.value },
                         })
                       }
-                    />
-                    <input
+                    /></label>
+                    <label><small>Çekin üzerindeki seri / evrak numarası</small><input
                       placeholder="Seri / evrak no"
                       value={detail.serialNumber}
                       onChange={(e) =>
@@ -2780,9 +2866,9 @@ function Instruments({ user }: { user: User }) {
                           },
                         })
                       }
-                    />
+                    /></label>
                     {item.instrumentType === "CHECK" && (
-                      <input
+                      <label><small>Çekin ait olduğu banka</small><input
                         placeholder="Banka"
                         value={detail.bankName}
                         onChange={(e) =>
@@ -2791,9 +2877,9 @@ function Instruments({ user }: { user: User }) {
                             [item.id]: { ...detail, bankName: e.target.value },
                           })
                         }
-                      />
+                      /></label>
                     )}
-                    <input
+                    <label><small>Çekin düzenlendiği tarih</small><input
                       type="date"
                       value={detail.issueDate}
                       onChange={(e) =>
@@ -2802,7 +2888,7 @@ function Instruments({ user }: { user: User }) {
                           [item.id]: { ...detail, issueDate: e.target.value },
                         })
                       }
-                    />
+                    /></label>
                     {user.role !== "AUDITOR" && (
                       <button
                         className="mini-btn"
@@ -2849,35 +2935,59 @@ function Instruments({ user }: { user: User }) {
                   <span className={(item.exchangeDifference || 0) < 0 ? "negative" : "positive"}><small>Kur farkı</small><b>{money(item.exchangeDifference || 0)}</b></span>
                 </div>
               )}
+              {expanded && item.discountCompany && (
+                <div className="collection-summary discount-summary">
+                  <span><small>Kırdırılan firma</small><b>{item.discountCompany}</b></span>
+                  <span><small>İşlem tarihi</small><b>{dateOnly(item.discountDate!)}</b></span>
+                  <span><small>Kırdırma oranı</small><b>%{item.discountRate?.toLocaleString("tr-TR")}</b></span>
+                  <span><small>Ek masraf</small><b>{money(item.discountFee||0,item.currency)}</b></span>
+                  <span><small>Komisyon</small><b>{money(item.discountCommission||0,item.currency)}</b></span>
+                  <span><small>Vergi</small><b>{money(item.discountTax||0,item.currency)}</b></span>
+                  <span><small>Rücu</small><b>{item.discountWithRecourse?"Rüculu":"Rücusuz"}</b></span>
+                  <span><small>Net ele geçen</small><b>{money(item.discountNetAmount||0,item.currency)}</b></span>
+                  <span><small>Toplam finansman maliyeti</small><b>{money(item.discountFinanceCost||0,item.currency)}</b></span>
+                  {item.discountWithRecourse&&item.status==="ASSIGNED"&&user.role!=="AUDITOR"&&<button className="reject-btn" onClick={()=>move(item,"BOUNCED")}>Rüculu çek ödenmedi — cariyi yeniden aç</button>}
+                </div>
+              )}
+              {expanded && item.endorsementCompany && (
+                <div className="collection-summary endorsement-summary">
+                  <span><small>Ciro edilen cari</small><b>{item.endorsementCompany}</b></span>
+                  <span><small>Ciro tarihi</small><b>{dateOnly(item.endorsementDate!)}</b></span>
+                  <span><small>Kapatılan borç</small><b>{money(item.endorsementAmount||0,item.currency)}</b></span>
+                  <span><small>Belge / borç referansı</small><b>{item.endorsementReference}</b></span>
+                  <span><small>Nakit etkisi</small><b>{money(0)}</b></span>
+                  <span><small>Finansman maliyeti</small><b>{money(0)}</b></span>
+                  {item.status==="ENDORSED"&&user.role!=="AUDITOR"&&<button className="reject-btn" onClick={()=>move(item,"BOUNCED")}>Ciro edilen çek karşılıksız çıktı</button>}
+                </div>
+              )}
               {expanded && !incomplete && user.role !== "AUDITOR" &&
                 !["COLLECTED", "CANCELLED", "ENDORSED", "ASSIGNED"].includes(
                   item.status,
                 ) && (
                   <>
-                  <div className="collection-editor">
+                  {item.status==="PLANNED"?<div className="receive-check-box"><div><b>Fiziksel çek size teslim edildi mi?</b><span>“Teslim aldım” dediğinizde çek portföye girer ve tutarı müşteri carisinden düşer.</span></div><button className="collect-btn" onClick={()=>move(item,"IN_PORTFOLIO")}><CheckCircle2/>Evet, çeki teslim aldım</button></div>:<div className="instrument-action-choice"><b>Bu çekle şimdi ne yapmak istiyorsunuz?</b><div><button className={activeAction[item.id]==="COLLECT"?"selected":""} onClick={()=>setActiveAction({...activeAction,[item.id]:"COLLECT"})}><CheckCircle2/><span><b>Tahsil edildi</b><small>Para bankaya geçti</small></span></button>{item.instrumentType==="CHECK"&&<button className={activeAction[item.id]==="DISCOUNT"?"selected":""} onClick={()=>setActiveAction({...activeAction,[item.id]:"DISCOUNT"})}><CircleDollarSign/><span><b>Çeki kırdır</b><small>Vadesinden önce nakde çevir</small></span></button>}<button className={activeAction[item.id]==="ENDORSE"?"selected":""} onClick={()=>setActiveAction({...activeAction,[item.id]:"ENDORSE"})}><ShoppingCart/><span><b>Tedarikçiye ciro et</b><small>Nakit çıkmadan borç kapat</small></span></button><button className={activeAction[item.id]==="OTHER"?"selected":""} onClick={()=>setActiveAction({...activeAction,[item.id]:"OTHER"})}><FileClock/><span><b>Başka işlem</b><small>Bankaya ver, temlik et, karşılıksız</small></span></button></div></div>}
+                  {item.status!=="PLANNED"&&activeAction[item.id]==="COLLECT"&&<div className="collection-editor">
                     <b>Tahsilat bilgisi</b>
                     <label><small>Gerçekleşen tarih</small><input type="date" value={collections[item.id]?.date || ""} onChange={(e) => setCollections({...collections,[item.id]:{...collections[item.id],date:e.target.value}})} /></label>
                     <label><small>{item.currency === "TRY" ? "Kur" : `${item.currency} tahsilat kuru`}</small><input type="number" min="0.0001" step="0.0001" readOnly={item.currency === "TRY"} value={collections[item.id]?.rate || ""} onChange={(e) => setCollections({...collections,[item.id]:{...collections[item.id],rate:Number(e.target.value)}})} /></label>
                     <span><small>Tahsilat TL karşılığı</small><b>{money(item.amount * (collections[item.id]?.rate || item.exchangeRate))}</b></span>
                     <button className="collect-btn" disabled={!collections[item.id]?.date || !collections[item.id]?.rate} onClick={() => move(item, "COLLECTED")}><CheckCircle2 />Tahsilatı kaydet</button>
-                  </div>
-                  <div className="instrument-actions">
+                  </div>}
+                  {item.status!=="PLANNED"&&activeAction[item.id]==="OTHER"&&<div className="instrument-actions simple-other-action">
                     <select
                       value={states[item.id] || ""}
                       onChange={(e) =>
                         setStates({ ...states, [item.id]: e.target.value })
                       }
                     >
-                      <option value="">Diğer işlem…</option>
-                      <option value="IN_PORTFOLIO">Portföye al</option>
-                      <option value="GIVEN_TO_BANK">Bankaya verildi</option>
-                      <option value="ENDORSED">Ciro edildi</option>
-                      <option value="ASSIGNED">Temlik edildi</option>
-                      <option value="BOUNCED">Karşılıksız</option>
-                      <option value="PROTESTED">Protestolu</option>
-                      <option value="RETURNED">İade</option>
+                      <option value="">İşlem seçin…</option>
+                      <option value="GIVEN_TO_BANK">Bankaya tahsile verdim</option>
+                      <option value="ASSIGNED">Alacağı başka kuruma devrettim (temlik)</option>
+                      <option value="BOUNCED">Çek karşılıksız çıktı</option>
+                      <option value="PROTESTED">Senet protesto edildi</option>
+                      <option value="RETURNED">Evrakı müşteriye iade ettim</option>
                     </select>
-                    {["ENDORSED", "ASSIGNED"].includes(states[item.id]) && (
+                    {states[item.id] === "ASSIGNED" && (
                       <input
                         placeholder="Devredilen kişi/kurum"
                         value={counterparties[item.id] || ""}
@@ -2890,9 +3000,33 @@ function Instruments({ user }: { user: User }) {
                       />
                     )}
                     <button className="mini-btn" onClick={() => move(item)}>
-                      Uygula
+                      Seçilen işlemi kaydet
                     </button>
-                  </div>
+                  </div>}
+                  {item.status!=="PLANNED"&&activeAction[item.id]==="ENDORSE"&&<div className="endorsement-editor">
+                    <div className="financial-safety-note"><b>Ciro nakit tahsilat değildir</b><small>Seçtiğiniz tedarikçinin açık borcu azalır. Müşteri carisi, banka ve ürün maliyeti ikinci kez değişmez.</small></div>
+                    <label><small>Çekin verileceği tedarikçi carisi</small><select value={endorsements[item.id]?.counterpartyCustomerId||0} onChange={e=>setEndorsements({...endorsements,[item.id]:{...endorsements[item.id],counterpartyCustomerId:Number(e.target.value)}})}><option value={0}>Tedarikçi seçin…</option>{customers.filter(c=>(c.tags||"").split(",").includes("SUPPLIER")).map(c=><option key={c.id} value={c.id}>{c.name} · {c.balance<0?`${money(Math.abs(c.balance))} açık borç`:"Açık borç yok"}</option>)}</select></label>
+                    <label><small>Borçtan düşülecek tutar ({item.currency})</small><input type="number" min="0.01" max={item.amount} step="0.01" value={endorsements[item.id]?.settlementAmount||""} onChange={e=>setEndorsements({...endorsements,[item.id]:{...endorsements[item.id],settlementAmount:Number(e.target.value)}})}/></label>
+                    <label><small>Alış faturası / borç referansı</small><input placeholder="Örn. AF-2026-184" value={endorsements[item.id]?.reference||""} onChange={e=>setEndorsements({...endorsements,[item.id]:{...endorsements[item.id],reference:e.target.value}})}/></label>
+                    <label><small>Ciro tarihi</small><input type="date" value={endorsements[item.id]?.date||""} onChange={e=>setEndorsements({...endorsements,[item.id]:{...endorsements[item.id],date:e.target.value}})}/></label>
+                    <label><small>Açıklama (isteğe bağlı)</small><input placeholder="Ciro açıklaması" value={endorsements[item.id]?.note||""} onChange={e=>setEndorsements({...endorsements,[item.id]:{...endorsements[item.id],note:e.target.value}})}/></label>
+                    <div className="endorsement-impact"><span><small>Çek nominali</small><b>{money(item.amount,item.currency)}</b></span><span><small>Nakit etkisi</small><b>{money(0)}</b></span><span><small>Finansman maliyeti</small><b>{money(0)}</b></span></div>
+                    <button className="mini-btn" onClick={()=>endorse(item)}>Ciroyu ve cari mahsubu kaydet</button>
+                  </div>}
+                  {item.status!=="PLANNED"&&item.instrumentType==="CHECK"&&activeAction[item.id]==="DISCOUNT"&&<div className="discount-editor">
+                    <div><b>Çeki kırdır / finansmana devret</b><small>Portföydeki bu çeki seçili firmaya devreder. Bu işlem müşterinin carisini ikinci kez düşürmez.</small></div>
+                    <label><small>Banka / finansman firması</small><input placeholder="Örn. ABC Faktoring" value={discounts[item.id]?.company||""} onChange={e=>setDiscounts({...discounts,[item.id]:{...discounts[item.id],company:e.target.value}})}/></label>
+                    <label><small>Kırdırma oranı (%)</small><input type="number" min="0" max="100" step="0.01" value={discounts[item.id]?.rate||0} onChange={e=>setDiscounts({...discounts,[item.id]:{...discounts[item.id],rate:Number(e.target.value)}})}/></label>
+                    <label><small>Oran biçimi</small><select value={discounts[item.id]?.pricingMethod||"ANNUAL"} onChange={e=>setDiscounts({...discounts,[item.id]:{...discounts[item.id],pricingMethod:e.target.value as "DIRECT"|"ANNUAL"}})}><option value="ANNUAL">Yıllık oran × kalan gün / 360</option><option value="DIRECT">Doğrudan toplam oran</option></select></label>
+                    <label><small>Komisyon ({item.currency})</small><input type="number" min="0" step="0.01" value={discounts[item.id]?.commission||0} onChange={e=>setDiscounts({...discounts,[item.id]:{...discounts[item.id],commission:Number(e.target.value)}})}/></label>
+                    <label><small>Vergi ({item.currency})</small><input type="number" min="0" step="0.01" value={discounts[item.id]?.tax||0} onChange={e=>setDiscounts({...discounts,[item.id]:{...discounts[item.id],tax:Number(e.target.value)}})}/></label>
+                    <label><small>Ek masraf ({item.currency})</small><input type="number" min="0" step="0.01" value={discounts[item.id]?.fee||0} onChange={e=>setDiscounts({...discounts,[item.id]:{...discounts[item.id],fee:Number(e.target.value)}})}/></label>
+                    <label><small>İşlem tarihi</small><input type="date" value={discounts[item.id]?.date||""} onChange={e=>setDiscounts({...discounts,[item.id]:{...discounts[item.id],date:e.target.value}})}/></label>
+                    <label className="recourse-choice"><input type="checkbox" checked={discounts[item.id]?.withRecourse??true} onChange={e=>setDiscounts({...discounts,[item.id]:{...discounts[item.id],withRecourse:e.target.checked}})}/><small>Rüculu (ödenmezse sorumluluk bizde)</small></label>
+                    <span><small>Vade günü / iskonto</small><b>{discountDays} gün · {money(discountCut,item.currency)}</b></span>
+                    <span><small>Net ele geçecek tutar</small><b>{money(discountNet,item.currency)}</b></span>
+                    <button className="mini-btn" onClick={()=>discount(item)}>Çeki kırdır</button>
+                  </div>}
                   </>
                 )}
             </article>
@@ -3081,7 +3215,7 @@ function EDocuments({ user }: { user: User }) {
 function UserPermissions({currentUser}:{currentUser:User}){
   type ManagedUser=User&{active:boolean;permissions:string[]};
   type Response={permissions:string[];users:ManagedUser[]};
-  const labels:Record<string,{title:string;description:string}>={DASHBOARD:{title:"Ana Sayfa",description:"Günlük özet ve bildirimler"},CUSTOMERS:{title:"Müşteriler",description:"Müşteri listesi ve detayları"},SALES:{title:"Satışlar",description:"Satış listesi ve yeni satış"},INSTRUMENTS:{title:"Kıymetli Evrak",description:"Çek ve senet işlemleri"},RECEIPTS:{title:"Cari ve Tahsilat",description:"Cari ekstre, vadeler ve tahsilat"},APPROVALS:{title:"Onaylar",description:"Onay, ret ve düzeltme kararları"},SHIPMENTS:{title:"Sevkiyatlar",description:"Sevkiyat planlama ve teslimat"},EDOCUMENTS:{title:"e-Belgeler",description:"e-Fatura, e-Arşiv ve e-İrsaliye"},AUDIT:{title:"Denetim Kayıtları",description:"Değiştirilemez işlem geçmişi"},SECURITY:{title:"Hesap Güvenliği",description:"2FA, passkey ve cihazlar"},USER_MANAGEMENT:{title:"Kullanıcı Yetkileri",description:"Kullanıcı ekran erişimlerini yönetme"}};
+const labels:Record<string,{title:string;description:string}>={DASHBOARD:{title:"Ana Sayfa",description:"Günlük özet ve bildirimler"},CUSTOMERS:{title:"Cariler",description:"Müşteri, bayi ve tedarikçi cari kartları"},SALES:{title:"Satışlar",description:"Satış listesi ve yeni satış"},INSTRUMENTS:{title:"Kıymetli Evrak",description:"Çek ve senet işlemleri"},RECEIPTS:{title:"Cari ve Tahsilat",description:"Cari ekstre, vadeler ve tahsilat"},APPROVALS:{title:"Onaylar",description:"Onay, ret ve düzeltme kararları"},SHIPMENTS:{title:"Sevkiyatlar",description:"Sevkiyat planlama ve teslimat"},EDOCUMENTS:{title:"e-Belgeler",description:"e-Fatura, e-Arşiv ve e-İrsaliye"},AUDIT:{title:"Denetim Kayıtları",description:"Değiştirilemez işlem geçmişi"},SECURITY:{title:"Hesap Güvenliği",description:"2FA, passkey ve cihazlar"},USER_MANAGEMENT:{title:"Kullanıcı Yetkileri",description:"Kullanıcı ekran erişimlerini yönetme"}};
   const [data,setData]=useState<Response|null>(null);const [selectedId,setSelectedId]=useState(0);const [draft,setDraft]=useState<string[]>([]);const [message,setMessage]=useState("");
   const load=useCallback(()=>api<Response>("/admin/users").then(result=>{setData(result);const id=selectedId||result.users.find(x=>x.role!=="ADMIN")?.id||result.users[0]?.id||0;setSelectedId(id);setDraft(result.users.find(x=>x.id===id)?.permissions||[])}),[selectedId]);
   useEffect(()=>{if(currentUser.role==="ADMIN")load()},[currentUser.role,load]);
@@ -3386,7 +3520,7 @@ function paymentTypeLabel(v: string) {
     )[v] || v
   );
 }
-function transactionTypeLabel(v:string){return ({CASH_RECEIPT:"Nakit",BANK_RECEIPT:"Havale / EFT",INSTRUMENT_RECEIPT:"Çek / senet",DOWN_PAYMENT:"Peşinat",RECEIPT_REVERSAL:"Ters kayıt"} as Record<string,string>)[v]||"Tahsilat"}
+function transactionTypeLabel(v:string){return ({CASH_RECEIPT:"Nakit",BANK_RECEIPT:"Havale / EFT",INSTRUMENT_RECEIPT:"Çek / senet tahsilatı",INSTRUMENT_RECEIVED:"Çek / senet teslim alındı",INSTRUMENT_BOUNCED:"Karşılıksız evrak — borç yeniden açıldı",DOWN_PAYMENT:"Peşinat",RECEIPT_REVERSAL:"Ters kayıt"} as Record<string,string>)[v]||"Tahsilat"}
 function dateOnly(value: string) {
   return new Intl.DateTimeFormat("tr-TR", { dateStyle: "medium" }).format(
     new Date(`${value}T12:00:00`),
