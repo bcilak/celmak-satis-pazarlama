@@ -6,4 +6,5 @@ data/
 *.log
 *.tsbuildinfo
 .tmp-financial-audit/
+.tmp-prodtest/
 .claude/settings.local.json
