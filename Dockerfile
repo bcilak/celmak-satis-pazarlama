@@ -24,8 +24,9 @@ RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/dist-server ./dist-server
 
-# Kalıcı veri dizini; volume buraya bağlanır. node kullanıcısına yazma izni ver.
-RUN mkdir -p /data && chown -R node:node /data /app
+# Kalıcı veri dizini; volume buraya bağlanır. node kullanıcısı yalnızca buraya
+# yazar (/app salt okunur çalışır), bu yüzden yalnızca /data chown'lanır.
+RUN mkdir -p /data && chown node:node /data
 USER node
 
 EXPOSE 3001
