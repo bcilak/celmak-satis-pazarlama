@@ -1,0 +1,22 @@
+[Unit]
+Description=Celmak Siparis Yonetimi
+After=network.target
+
+[Service]
+Type=simple
+User=celmak
+Group=celmak
+WorkingDirectory=/opt/celmak
+EnvironmentFile=/etc/celmak/celmak.env
+ExecStart=/usr/bin/node dist-server/index.js
+Restart=on-failure
+RestartSec=5
+# Veri dizini dışında yazmaya izin verme (güvenlik sıkılaştırması).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/celmak
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

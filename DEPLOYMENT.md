@@ -1,48 +1,102 @@
-# Vercel ön inceleme kurulumu
+# Kurulum — Kendi Sunucunuz (Webmin / Linux)
 
-Bu uygulamada Vercel arayüzü, Railway ise Express API ve kalıcı SQLite diski için kullanılır.
+Uygulama **tek bir Node servisidir**: aynı süreç hem arayüzü (`dist/`) hem de
+API'yi (`/api`) yayınlar. Önüne bir Nginx reverse proxy ve HTTPS koyulur,
+veriler SQLite olarak kalıcı bir dizinde (`DATA_DIR`) tutulur.
 
-## 1. Railway API
+> **Node sürümü:** En az **Node.js 22.5.0** gerekir (uygulama yerleşik
+> `node:sqlite` modülünü kullanır). Daha eski sürüm çalışmaz.
 
-1. Railway'de **New Project > Deploy from GitHub repo** ile bu depoyu seçin.
-2. Servise bir **Volume** ekleyin ve mount path değerini `/app/data` yapın.
-3. Aşağıdaki environment variable değerlerini ekleyin:
+Hazır şablonlar `deploy/` klasöründedir: `celmak.service`, `celmak.env.example`,
+`nginx-celmak.conf`.
 
-```text
-NODE_ENV=production
-DATA_DIR=/app/data
-WEB_ORIGIN=https://VERCEL-ADRESINIZ.vercel.app
-CROSS_ORIGIN_COOKIES=true
-WEBAUTHN_RP_ID=VERCEL-ADRESINIZ.vercel.app
-WEBAUTHN_ORIGIN=https://VERCEL-ADRESINIZ.vercel.app
+---
+
+## 1. Sunucuyu hazırlayın
+
+```bash
+# Node 22.x (NodeSource ile; Debian/Ubuntu örneği)
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt-get install -y nodejs
+node -v   # v22.5.0 veya üzeri olmalı
+
+# Uygulama için ayrı bir kullanıcı ve dizinler
+sudo useradd --system --home /opt/celmak --shell /usr/sbin/nologin celmak
+sudo mkdir -p /opt/celmak /var/lib/celmak/data /etc/celmak
+sudo chown -R celmak:celmak /opt/celmak /var/lib/celmak
 ```
 
-4. Railway servisinde **Generate Domain** seçeneğini kullanın.
-5. `https://RAILWAY-ADRESINIZ/api/health` adresinin `{"status":"ok"}` döndürdüğünü kontrol edin.
+## 2. Kodu sunucuya alın ve derleyin
 
-> Volume olmadan SQLite kayıtları yeni deploy veya servis yeniden başlatmasında kaybolabilir.
+```bash
+# Depoyu /opt/celmak içine klonlayın (ya da dosyaları oraya kopyalayın)
+sudo -u celmak git clone <DEPO_URL> /opt/celmak
+cd /opt/celmak
 
-## 2. Vercel arayüzü
-
-Vercel projesinin **Settings > Environment Variables** bölümüne şunu ekleyin:
-
-```text
-VITE_API_BASE_URL=https://RAILWAY-ADRESINIZ
+sudo -u celmak npm ci
+sudo -u celmak npm run build   # dist/ (arayüz) + dist-server/ (API) üretir
 ```
 
-Değeri Production, Preview ve Development ortamlarına uygulayın. Ardından Vercel'de son deployment için **Redeploy** çalıştırın. Vite ortam değişkenlerini derleme anında aldığı için yalnızca değişkeni eklemek yetmez; yeniden deploy gerekir.
+> Güncellemelerde: `git pull && npm ci && npm run build && sudo systemctl restart celmak`
 
-## 3. Giriş kontrolü
+## 3. Ortam değişkenlerini girin
 
-```text
-E-posta: selin@celmak.com
-Parola: Celmak!2026
+```bash
+sudo cp deploy/celmak.env.example /etc/celmak/celmak.env
+sudo nano /etc/celmak/celmak.env     # alan adını ve yolları doldurun
+sudo chmod 600 /etc/celmak/celmak.env
+sudo chown celmak:celmak /etc/celmak/celmak.env
 ```
 
-Yönetici onayı testi için `mehmet@celmak.com` veya `ayse@celmak.com` kullanılabilir. Başlangıç parolası aynıdır.
+En az şunları ayarlayın: `NODE_ENV=production`, `PORT=3001`,
+`DATA_DIR=/var/lib/celmak/data`, `WEBAUTHN_RP_ID`, `WEBAUTHN_ORIGIN`,
+`WEB_ORIGIN` (hepsi gerçek alan adınız).
 
-Tarayıcı geliştirici araçlarında `/api/auth/login` isteği `200` dönmeli ve `celmak_session` adlı Secure/HttpOnly çerez oluşmalıdır.
+## 4. systemd servisi olarak çalıştırın
 
-## 4. Güvenlik notu
+```bash
+sudo cp deploy/celmak.service /etc/systemd/system/celmak.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now celmak
+sudo systemctl status celmak          # active (running) olmalı
+curl -s http://127.0.0.1:3001/api/health   # {"status":"ok","database":"sqlite"}
+```
 
-Bu hesaplar ve ortak başlangıç parolası yalnızca anonim demo verisiyle yapılan ön inceleme içindir. Gerçek kullanım öncesinde parolalar değiştirilmeli, gerçek e-posta servisi bağlanmalı ve ayrı bir üretim veritabanına geçilmelidir.
+> Webmin'de de görünür: **System > Bootup and Shutdown** altında `celmak`
+> servisini durdurup başlatab, loglarını **Others > System Logs** veya
+> `journalctl -u celmak -f` ile izleyebilirsiniz.
+
+## 5. Nginx reverse proxy + HTTPS
+
+```bash
+sudo cp deploy/nginx-celmak.conf /etc/nginx/sites-available/celmak.conf
+sudo ln -s /etc/nginx/sites-available/celmak.conf /etc/nginx/sites-enabled/
+# nginx-celmak.conf içindeki server_name değerini alan adınızla değiştirin
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+HTTPS sertifikası:
+
+- **Webmin yoluyla:** *Servers > Nginx Webserver* (veya *Webmin > Networking*
+  altındaki Let's Encrypt aracı) ile alan adına sertifika alın.
+- **Komut satırıyla:** `sudo certbot --nginx -d celmak.ornekalanadi.com`
+  (certbot 443 bloğunu ve 80→443 yönlendirmesini otomatik ekler).
+
+> Uygulama `trust proxy` açık geldiği için proxy arkasındaki HTTPS'i doğru
+> algılar; Secure/HttpOnly çerezler bu sayede düzgün çalışır.
+
+## 6. Yayına almadan önce (zorunlu)
+
+- **Tüm başlangıç/demo parolalarını değiştirin.** `Celmak!2026` ortak demo
+  parolası ve demo hesaplar canlıya taşınmamalıdır.
+- **Parola sıfırlama e-postası henüz bağlı değildir:** şu an sıfırlama bağlantısı
+  sunucu loguna (`journalctl -u celmak`) yazılır. Gerçek kullanım için bir SMTP/
+  e-posta sağlayıcısı eklenmesi planlanmalıdır.
+- `DATA_DIR` dizinini (`/var/lib/celmak/data`) düzenli **yedekleyin** — tüm veri
+  oradaki `celmak.db` dosyasındadır.
+
+## 7. Giriş kontrolü
+
+Alan adınıza tarayıcıdan girin; `/api/auth/login` isteği `200` dönmeli ve
+`celmak_session` adlı Secure/HttpOnly çerez oluşmalıdır. `/api/health`
+`{"status":"ok"}` döndürüyorsa servis ayaktadır.

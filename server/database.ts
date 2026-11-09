@@ -7,8 +7,8 @@ import { fileURLToPath } from 'node:url'
 import { randomBytes, scryptSync } from 'node:crypto'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-// Railway/Render gibi ortamlarda kalıcı diskin bağlandığı yolu dışarıdan alır.
-// Yerel geliştirmede mevcut data klasörü kullanılmaya devam eder.
+// Sunucuda kalıcı veri dizinini dışarıdan (DATA_DIR) alır; yerel
+// geliştirmede proje içindeki data klasörü kullanılmaya devam eder.
 const dataDir = process.env.DATA_DIR ? resolve(process.env.DATA_DIR) : resolve(root, 'data')
 mkdirSync(dataDir, { recursive: true })
 
