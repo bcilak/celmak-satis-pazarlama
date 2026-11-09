@@ -13,6 +13,9 @@ import {
   timingSafeEqual,
 } from "node:crypto";
 import { z } from "zod";
+import { existsSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   generateAuthenticationOptions,
   generateRegistrationOptions,
@@ -414,7 +417,7 @@ app.post("/api/auth/passkey/verify", async (req, res) => {
   }
 });
 
-app.use((req, res, next) => {
+app.use("/api", (req, res, next) => {
   const token = cookieToken(req);
   let user: AppUser | undefined;
   if (token) {
@@ -2517,6 +2520,16 @@ app.get("/api/audit-logs", allow("ADMIN", "AUDITOR"), (_req, res) => {
       .all(),
   );
 });
+
+// Tek servisli dağıtımda derlenmiş arayüzü (dist/) sun. API dışındaki tüm
+// yollar istemci tarafı yönlendirme için index.html'e düşer.
+const clientDir = resolve(dirname(fileURLToPath(import.meta.url)), "..", "dist");
+if (existsSync(clientDir)) {
+  app.use(express.static(clientDir));
+  app.get(/^\/(?!api\/).*/, (_req, res) => {
+    res.sendFile(resolve(clientDir, "index.html"));
+  });
+}
 
 app.use((error: unknown, req: Request, res: Response, _next: NextFunction) => {
   void _next;
