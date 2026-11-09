@@ -14,6 +14,7 @@ import {
   Routes,
   useNavigate,
   useParams,
+  useSearchParams,
 } from "react-router-dom";
 import {
   Bell,
@@ -37,6 +38,7 @@ import {
   X,
 } from "lucide-react";
 import { api } from "./api";
+import { CheckAdvanceForm, CheckAdvanceHistory } from "./CheckAdvances";
 import {
   startAuthentication,
   startRegistration,
@@ -112,7 +114,7 @@ function Login({ onSuccess }: { onSuccess: () => void }) {
       <section className="login-brand">
         <div className="brand-mark">Ç</div>
         <h1>
-          Satışın her adımı
+          Siparişin her adımı
           <br />
           tek ve güvenli yerde.
         </h1>
@@ -126,7 +128,7 @@ function Login({ onSuccess }: { onSuccess: () => void }) {
         </div>
       </section>
       <form className="login-card" onSubmit={submit}>
-        <span className="eyebrow">ÇELMAK SATIŞ YÖNETİMİ</span>
+        <span className="eyebrow">ÇELMAK SİPARİŞ YÖNETİMİ</span>
         <h2>Hesabınıza giriş yapın</h2>
         <p>Kişisel kullanıcı bilgilerinizle devam edin.</p>
         {error && <div className="error-box">{error}</div>}
@@ -202,14 +204,16 @@ function App() {
   const menu=[
     ["DASHBOARD","/","Ana Sayfa",<LayoutDashboard/>],
     ["CUSTOMERS","/musteriler","Cariler",<Users/>],
-    ["SALES","/satislar","Satışlar",<ShoppingCart/>],
-    ["INSTRUMENTS","/kiymetli-evrak","Kıymetli Evrak",<Landmark/>],
-    ["RECEIPTS","/tahsilatlar","Cari ve Tahsilat",<CircleDollarSign/>],
+    ["SALES","/satislar","Siparişler",<ShoppingCart/>],
+    ["SALES","/yedek-parcalar","Yedek Parçalar",<Boxes/>],
+    ["INSTRUMENTS","/kiymetli-evrak","Çek ve Senetler",<Landmark/>],
+    ["RECEIPTS","/tahsilatlar","Tahsilatlar",<CircleDollarSign/>],
+    ["RECEIPTS","/avanslar","Avanslar",<CircleDollarSign/>],
     ["APPROVALS","/onaylar","Onaylar",<ClipboardCheck/>],
     ["SHIPMENTS","/sevkiyatlar","Sevkiyatlar",<PackageCheck/>],
     ["EDOCUMENTS","/e-belgeler","e-Belgeler",<FileText/>],
-    ["AUDIT","/loglar","Denetim Kayıtları",<ShieldCheck/>],
-    ["SECURITY","/guvenlik","Hesap Güvenliği",<ShieldCheck/>],
+    ["AUDIT","/loglar","İşlem Geçmişi",<ShieldCheck/>],
+    ["SECURITY","/guvenlik","Güvenlik",<ShieldCheck/>],
     ["USER_MANAGEMENT","/kullanici-yetkileri","Kullanıcı Yetkileri",<Users/>],
   ] as const;
   const guard=(permission:string,element:ReactNode)=>can(permission)?element:<Empty title="Erişim yok" text="Bu ekran yöneticiniz tarafından hesabınıza açılmamış."/>;
@@ -220,11 +224,11 @@ function App() {
           <div className="brand-mark">Ç</div>
           <div>
             <b>ÇELMAK</b>
-            <span>Satış Yönetimi</span>
+            <span>Sipariş Yönetimi</span>
           </div>
         </div>
         <nav>
-          {menu.filter(([permission])=>can(permission)).map(([permission,to,label,icon])=><SideLink key={permission} to={to} icon={icon} label={label} badge={permission==="APPROVALS"&&session.currentUser.role==="ADMIN"?"!":undefined} close={()=>setMobileOpen(false)}/>)}
+          {menu.filter(([permission])=>can(permission)).map(([permission,to,label,icon])=><SideLink key={permission} to={to} icon={icon} label={label} close={()=>setMobileOpen(false)}/>)}
         </nav>
         <div className="sidebar-foot">
           <ShieldCheck />
@@ -243,15 +247,8 @@ function App() {
           >
             <Menu />
           </button>
-          <div className="top-search">
-            <Search />
-            <span>Cari, satış veya ürün ara…</span>
-            <kbd>⌘ K</kbd>
-          </div>
+          <div className="top-context"><b>Çelmak çalışma alanı</b><span>Yapmak istediğiniz işlemi sol menüden seçin.</span></div>
           <div className="top-actions">
-            <button className="icon-btn">
-              <Bell />
-            </button>
             <div className="user-select">
               <div className="avatar">
                 {session.currentUser.name
@@ -278,12 +275,16 @@ function App() {
             />
             <Route path="/musteriler" element={guard("CUSTOMERS",<Customers />)} />
             <Route path="/musteriler/yeni" element={guard("CUSTOMERS",<NewCustomer />)} />
-            <Route path="/musteriler/:id" element={guard("CUSTOMERS",<CustomerDetail />)} />
+            <Route path="/musteriler/:id" element={guard("CUSTOMERS",<CustomerDetail user={session.currentUser} />)} />
             <Route
               path="/satislar"
               element={guard("SALES",<Sales user={session.currentUser} />)}
             />
-            <Route path="/satislar/yeni" element={guard("SALES",<NewSale />)} />
+            <Route path="/satislar/yeni" element={guard("SALES",<NewSale key="new" />)} />
+            <Route path="/satislar/:id/duzenle" element={guard("SALES",<NewSale key="edit" />)} />
+            <Route path="/yedek-parcalar" element={guard("SALES",<SpareParts user={session.currentUser} />)} />
+            <Route path="/yedek-parcalar/yeni" element={guard("SALES",<NewSale key="spare" spare />)} />
+            <Route path="/onaylar/siparis/:id" element={guard("APPROVALS",<SaleDetail />)} />
             <Route path="/satislar/:id" element={guard("SALES",<SaleDetail />)} />
             <Route
               path="/onaylar"
@@ -295,12 +296,13 @@ function App() {
             />
             <Route
               path="/tahsilatlar"
-              element={guard("RECEIPTS",<Receipts user={session.currentUser} />)}
+              element={guard("RECEIPTS",<Receipts key="receipts" user={session.currentUser} />)}
             />
             <Route
               path="/sevkiyatlar"
               element={guard("SHIPMENTS",<Shipments user={session.currentUser} />)}
             />
+            <Route path="/avanslar" element={guard("RECEIPTS",<Receipts key="advances" user={session.currentUser} advanceOnly />)} />
             <Route path="/sevkiyatlar/yeni" element={guard("SHIPMENTS",<NewShipment />)} />
             <Route
               path="/e-belgeler"
@@ -364,6 +366,10 @@ function PageHead({
   );
 }
 
+function ScreenGuide({title,steps,note}:{title:string;steps:string[];note?:string}){
+  return <section className="screen-guide"><div><span className="eyebrow">BU EKRANDA NE YAPACAĞIM?</span><h2>{title}</h2>{note&&<p>{note}</p>}</div><ol>{steps.map((step,index)=><li key={step}><i>{index+1}</i><span>{step}</span></li>)}</ol></section>
+}
+
 function Dashboard({ user }: { user: User }) {
   type DashboardData = {
     totals: {
@@ -396,16 +402,17 @@ function Dashboard({ user }: { user: User }) {
   return (
     <>
       <PageHead
-        eyebrow="24 Ağustos 2026 · Pazartesi"
+        eyebrow={new Intl.DateTimeFormat("tr-TR",{dateStyle:"full"}).format(new Date())}
         title={`Günaydın, ${user.name.split(" ")[0]}`}
-        description="Bugünün satış, tahsilat ve onay gündemi burada."
+        description="Bugünün sipariş, tahsilat ve onay gündemi burada."
         action={
           <NavLink className="primary-btn" to="/satislar/yeni">
             <Plus />
-            Yeni satış
+            Yeni sipariş
           </NavLink>
         }
       />
+      <ScreenGuide title="Bugün nereden başlamalısınız?" steps={["Onay bekleyen iş varsa Onaylar ekranını kontrol edin.","Vadesi gelen ödemeler için Tahsilatlar veya Çek ve Senetler ekranına gidin.","Yeni sipariş için Yeni sipariş düğmesini kullanın."]} note="Aşağıdaki kartlar yalnızca özet verir; işlemi ilgili ekranda tamamlarsınız."/>
       <div className="metric-grid">
         <Metric
           icon={<CircleDollarSign />}
@@ -424,21 +431,21 @@ function Dashboard({ user }: { user: User }) {
         <Metric
           icon={<FileClock />}
           tone="blue"
-          label="Bekleyen satış"
+          label="Bekleyen sipariş"
           value={String(data.totals.pendingSales)}
           note="İşlem sırasındaki"
         />
         <Metric
           icon={<CheckCircle2 />}
           tone="violet"
-          label="Onaylı satış hacmi"
+          label="Onaylı sipariş hacmi"
           value={money(data.totals.approvedSales)}
           note="Toplam"
         />
       </div>
       <div className="dashboard-grid">
         <section className="panel">
-          <PanelTitle title="Son satışlar" link="/satislar" />
+          <PanelTitle title="Son siparişler" link="/satislar" />
           <SaleTable sales={data.recent} />
         </section>
         <section className="panel">
@@ -528,6 +535,7 @@ function Customers() {
           </NavLink>
         }
       />
+      <ScreenGuide title="Müşteri ve tedarikçi hesaplarını buradan bulun." steps={["Arama alanına firma adı veya cari kodu yazın.","Kartta bakiye ve risk durumunu kontrol edin.","Sipariş, ödeme ve sevkiyat geçmişi için Cari detayını açın."]}/>
       <section className="panel">
         <div className="toolbar">
           <label className="search-input">
@@ -550,7 +558,7 @@ function Customers() {
                 <span
                   className={c.balance > c.riskLimit ? "risk danger" : "risk"}
                 >
-                  {c.balance > c.riskLimit ? "Limit aşıldı" : "Risk normal"}
+                  {(c.tags||"").split(",").includes("CUSTOMER")?(c.balance > c.riskLimit ? "Limit aşıldı" : "Risk normal"):"Tedarikçi hesabı"}
                 </span>
               </div>
               <h3>{c.name}</h3>
@@ -560,12 +568,12 @@ function Customers() {
               </p>
               <div className="customer-finance">
                 <div>
-                  <small>Güncel bakiye</small>
-                  <strong>{money(c.balance)}</strong>
+                  <small>{c.balance>0?"Bizim alacağımız":c.balance<0?"Bizim borcumuz":"Bakiye kapalı"}</small>
+                  <strong>{money(Math.abs(c.balance))}</strong>
                 </div>
                 <div>
-                  <small>Risk limiti</small>
-                  <strong>{money(c.riskLimit)}</strong>
+                  <small>{(c.tags||"").split(",").includes("CUSTOMER")?"Risk limiti":"Hesap türü"}</small>
+                  <strong>{(c.tags||"").split(",").includes("CUSTOMER")?money(c.riskLimit):"Tedarikçi"}</strong>
                 </div>
               </div>
               <NavLink className="text-btn" to={`/musteriler/${c.id}`}>
@@ -615,6 +623,7 @@ function NewCustomer() {
         title="Yeni cari"
         description="Bir cari aynı anda müşteri, bayi ve tedarikçi olarak işaretlenebilir."
       />
+      <ScreenGuide title="Firma hesabını üç bölümde oluşturun." steps={["Firma ve iletişim bilgilerini yazın.","Firmanın müşteri, bayi veya tedarikçi rollerini seçin.","Cari kodu, varsayılan vade ve risk limitini belirleyip kaydedin."]} note="Aynı firma hem müşteriniz hem tedarikçinizse iki türü birlikte işaretleyebilirsiniz."/>
       {error && <div className="error-box">{error}</div>}
       <section className="panel customer-form">
         <div className="form-block">
@@ -644,11 +653,11 @@ function NewCustomer() {
         </div>
         <div className="form-block"><h2>Cari türleri</h2><p className="info-note">Aynı firmaya birden fazla rol verebilirsiniz.</p><div className="tag-picker">{[["CUSTOMER","Müşteri"],["DEALER","Bayi"],["SUPPLIER","Tedarikçi"]].map(([value,label])=><label key={value} className={tags.includes(value)?"selected":""}><input type="checkbox" checked={tags.includes(value)} onChange={e=>setTags(e.target.checked?[...tags,value]:tags.length>1?tags.filter(x=>x!==value):tags)}/><span>{label}</span></label>)}</div></div>
         <div className="form-block">
-          <h2>Müşteri kodu</h2>
+          <h2>Cari kodu</h2>
           <div className="choice-grid code-source">
             {[
-              ["AUTO", "Otomatik Çelmak kodu"],
-              ["MANUAL", "Mevcut kodu elle gir"],
+              ["AUTO", "Otomatik cari kodu"],
+              ["MANUAL", "Cari kodunu elle gir"],
               ["EXTERNAL", "ERP / muhasebe kodu"],
             ].map(([value, label]) => (
               <label className={source === value ? "selected" : ""} key={value}>
@@ -665,7 +674,7 @@ function NewCustomer() {
           {source !== "AUTO" && (
             <div className="form-grid integration-fields">
               <label className="field">
-                <span>Müşteri kodu *</span>
+                <span>Cari kodu *</span>
                 <input required name="code" placeholder="Örn. 120.01.001" />
               </label>
               {source === "EXTERNAL" && (
@@ -733,7 +742,7 @@ function NewCustomer() {
   );
 }
 
-function CustomerDetail() {
+function CustomerDetail({user}:{user:User}) {
   type Detail = {
     customer: Customer & { taxNumber?: string; createdAt: string };
     stats: {
@@ -809,13 +818,14 @@ function CustomerDetail() {
             <NavLink className="mini-btn" to="/kiymetli-evrak">
               Kıymetli evrak
             </NavLink>
-            <NavLink className="primary-btn" to="/satislar/yeni">
+            <NavLink className="primary-btn" to={`/satislar/yeni?customerId=${c.id}`}>
               <Plus />
-              Yeni satış
+              Yeni sipariş
             </NavLink>
           </div>
         }
       />
+      <ScreenGuide title="Bu carinin bütün hareketlerini tek yerde görün." steps={["Üstte güncel borç ve gecikmiş ödemeyi kontrol edin.","Sekmelerden sipariş, vade veya sevkiyat geçmişini açın.","Yeni işlem için sağ üstteki sipariş veya kıymetli evrak düğmesini kullanın."]}/>
       <section className="customer-finance-hero">
         <div className={`debt-answer ${c.balance>0?"has-debt":"clear"}`}>
           <small>MÜŞTERİNİN BUGÜNKÜ BORCU</small>
@@ -829,10 +839,16 @@ function CustomerDetail() {
           <div><small>Açık ödeme planı</small><b>{money(openTry)}</b><span>{openSchedules.length} ödeme / çek / senet</span></div>
         </div>
       </section>
+      <section className="panel advance-panel">
+        <div><span className="eyebrow">BAĞLANTI AVANSI</span><h2>Avans ve siparişten düşme</h2><p>Önceden alınan ödeme cariye işlenir. Mevcut borçlardan sonra kalan tutarı makine veya yedek parça siparişinde kullanabilirsiniz.</p></div>
+        <div className="advance-balance"><span>Kullanılabilir cari avansı</span><strong>{money(Math.max(0,-c.balance))}</strong><small>Net cari alacak bakiyesi · TL</small></div>
+        <div className="head-actions">{user.permissions?.includes("RECEIPTS")&&<NavLink className="primary-btn" to={`/avanslar?customerId=${c.id}`}><Plus/>Avans gir / hareketleri gör</NavLink>}{user.permissions?.includes("SALES")&&<><NavLink className="mini-btn" to={`/satislar/yeni?customerId=${c.id}`}>Makine siparişinde kullan</NavLink><NavLink className="mini-btn" to={`/yedek-parcalar/yeni?customerId=${c.id}`}>Parça siparişinde kullan</NavLink></>}</div>
+        <small>Avans düşümü sipariş formundaki “Cari avansından kullanılacak tutar” alanından yapılır; sipariş onaylandığında bakiyeye yansır. Avans girişini muhasebe veya yönetici yapabilir.</small>
+      </section>
       <div className="detail-tabs">
         {[
           ["overview", "Borç özeti"],
-          ["sales", "Satışlar"],
+          ["sales", "Siparişler"],
           ["payments", "Vadeler ve tahsilatlar"],
           ["shipments", "Sevkiyatlar"],
         ].map(([value, label]) => (
@@ -856,7 +872,7 @@ function CustomerDetail() {
               <i>=</i>
               <span className="result"><small>Kalan borç</small><b>{money(c.balance)}</b></span>
             </div>
-            <p>Satışlar müşteriyi borçlandırır; nakit, havale, çek ve senet tahsilatları borcu azaltır.</p>
+            <p>Siparişler müşteriyi borçlandırır; nakit, havale, çek ve senet tahsilatları borcu azaltır.</p>
           </section>
           <section className="panel customer-mini-info">
             <PanelTitle title="Müşteri bilgileri" />
@@ -891,7 +907,7 @@ function CustomerDetail() {
               <table>
                 <thead>
                   <tr>
-                    <th>Satış</th>
+                    <th>Sipariş</th>
                     <th>Vade</th>
                     <th>Tür</th>
                     <th>Tutar</th>
@@ -958,7 +974,7 @@ function CustomerDetail() {
               <thead>
                 <tr>
                   <th>Sevkiyat</th>
-                  <th>Satış</th>
+                  <th>Sipariş</th>
                   <th>Planlanan tarih</th>
                   <th>Miktar</th>
                   <th>Durum</th>
@@ -1015,18 +1031,19 @@ function Sales({ user }: { user: User }) {
   return (
     <>
       <PageHead
-        eyebrow="SATIŞ YÖNETİMİ"
-        title="Satışlar"
-        description="Taslak, onay bekleyen ve tamamlanan satışları takip edin."
+        eyebrow="SİPARİŞ YÖNETİMİ"
+        title="Siparişler"
+        description="Taslak, onay bekleyen ve tamamlanan siparişleri takip edin."
         action={
           (user.role === "SALES" || user.role === "ADMIN") && (
             <NavLink className="primary-btn" to="/satislar/yeni">
               <Plus />
-              Yeni satış
+              Yeni sipariş
             </NavLink>
           )
         }
       />
+      <ScreenGuide title="Siparişin hangi aşamada olduğunu kontrol edin." steps={["Sipariş numarasına tıklayarak ürün ve ödeme detayını açın.","Taslak sipariş hazırsa Onaya gönder düğmesine basın.","Onaylanan sipariş için sevkiyat ve tahsilat ekranlarından devam edin."]}/>
       {message && <Toast text={message} close={() => setMessage("")} />}
       <section className="panel">
         <SaleTable
@@ -1052,7 +1069,7 @@ function SaleTable({
       <table>
         <thead>
           <tr>
-            <th>Satış</th>
+            <th>Sipariş</th>
             <th>Müşteri</th>
             <th>Tutar</th>
             <th>Oluşturan</th>
@@ -1082,9 +1099,9 @@ function SaleTable({
                 {action && (
                   <td>
                     {["DRAFT", "REVISION_REQUESTED"].includes(s.status) && (
-                      <button className="mini-btn" onClick={() => action(s.id)}>
+                      <><NavLink className="mini-btn" to={`/satislar/${s.id}/duzenle`}>Düzenle</NavLink><button className="mini-btn" onClick={() => action(s.id)}>
                         Onaya gönder
-                      </button>
+                      </button></>
                     )}
                   </td>
                 )}
@@ -1093,7 +1110,7 @@ function SaleTable({
           ) : (
             <tr>
               <td colSpan={6}>
-                <EmptyInline text="Henüz satış kaydı yok." />
+                <EmptyInline text="Henüz sipariş kaydı yok." />
               </td>
             </tr>
           )}
@@ -1104,12 +1121,56 @@ function SaleTable({
 }
 
 function SaleDetail(){
-  type Detail={sale:{id:number;number:string;status:string;paymentMethod:string;subtotal:number;vatTotal:number;grandTotal:number;downPayment:number;currency:string;exchangeRate:number;createdAt:string;customerId:number;customerCode:string;customerName:string;createdBy:string;approvalAssignee?:string};items:{id:number;code:string;name:string;unit:string;quantity:number;unitPrice:number;vatRate:number;lineTotal:number}[];schedule:{sequenceNo:number;paymentType:string;dueDate:string;amount:number;paidAmount:number;currency:string;status:string}[];shipments:{id:number;number:string;status:string;plannedDate:string;actualDate?:string;dispatchNumber?:string}[]};
-  const{id}=useParams();const[data,setData]=useState<Detail|null>(null);useEffect(()=>{api<Detail>(`/sales/${id}/detail`).then(setData)},[id]);if(!data)return <div className="loading">Satış detayı hazırlanıyor…</div>;const s=data.sale;
-  return <><PageHead eyebrow={`${s.customerCode} · ${s.number}`} title={s.customerName} description={`${formatDate(s.createdAt)} tarihinde ${s.createdBy} tarafından oluşturuldu.`}/><div className="sale-detail-grid"><section className="panel"><PanelTitle title="Satılan ürünler"/><div className="table-wrap"><table><thead><tr><th>Ürün</th><th>Miktar</th><th>Birim fiyat</th><th>KDV</th><th>Satır toplamı</th></tr></thead><tbody>{data.items.map(x=><tr key={x.id}><td><b>{x.name}</b><small>{x.code}</small></td><td>{x.quantity} {x.unit}</td><td>{money(x.unitPrice,s.currency)}</td><td>%{x.vatRate}</td><td className="amount">{money(x.lineTotal,s.currency)}</td></tr>)}</tbody></table></div></section><aside className="panel sale-financial-summary"><PanelTitle title="Finansal özet"/><p><span>Ara toplam</span><b>{money(s.subtotal,s.currency)}</b></p><p><span>KDV</span><b>{money(s.vatTotal,s.currency)}</b></p><p className="grand"><span>Genel toplam</span><b>{money(s.grandTotal,s.currency)}</b></p><p><span>Peşinat</span><b>{money(s.downPayment,s.currency)}</b></p><p><span>Ödeme şekli</span><b>{paymentTypeLabel(s.paymentMethod)}</b></p><p><span>Onay yetkilisi</span><b>{s.approvalAssignee||"Belirlenmedi"}</b></p><Status value={s.status}/></aside></div><section className="panel sale-schedule"><PanelTitle title="Ödeme ve vade planı"/><div className="compact-list">{data.schedule.map(x=><div key={x.sequenceNo}><span><b>{x.sequenceNo}. ödeme · {paymentTypeLabel(x.paymentType)}</b><small>{dateOnly(x.dueDate)}</small></span><strong>{money(x.amount,x.currency)}<small>{x.paidAmount?`${money(x.paidAmount,x.currency)} ödendi`:"Ödeme bekleniyor"}</small></strong><Status value={x.status}/></div>)}</div></section></>;
+  type Detail={sale:{id:number;number:string;status:string;paymentMethod:string;subtotal:number;vatTotal:number;grandTotal:number;downPayment:number;advanceAmount:number;note?:string;currency:string;exchangeRate:number;createdAt:string;customerId:number;customerCode:string;customerName:string;createdBy:string;approvalAssignee?:string};items:{id:number;code:string;name:string;unit:string;quantity:number;unitPrice:number;vatRate:number;lineTotal:number}[];schedule:{sequenceNo:number;paymentType:string;dueDate:string;amount:number;paidAmount:number;currency:string;status:string}[];shipments:{id:number;number:string;status:string;plannedDate:string;actualDate?:string;dispatchNumber?:string}[]};
+  const{id}=useParams();const[data,setData]=useState<Detail|null>(null);useEffect(()=>{api<Detail>(`/sales/${id}/detail`).then(setData)},[id]);if(!data)return <div className="loading">Sipariş detayı hazırlanıyor…</div>;const s=data.sale;
+  return <><PageHead eyebrow={`${s.customerCode} · ${s.number}`} title={s.customerName} description={`${formatDate(s.createdAt)} tarihinde ${s.createdBy} tarafından oluşturuldu.`}/><div className="sale-detail-grid"><section className="panel"><PanelTitle title="Satılan ürünler"/><div className="table-wrap"><table><thead><tr><th>Ürün</th><th>Miktar</th><th>Birim fiyat</th><th>KDV</th><th>Satır toplamı</th></tr></thead><tbody>{data.items.map(x=><tr key={x.id}><td><b>{x.name}</b><small>{x.code}</small></td><td>{x.quantity} {x.unit}</td><td>{money(x.unitPrice,s.currency)}</td><td>%{x.vatRate}</td><td className="amount">{money(x.lineTotal,s.currency)}</td></tr>)}</tbody></table></div></section><aside className="panel sale-financial-summary"><PanelTitle title="Finansal özet"/><p><span>Ara toplam</span><b>{money(s.subtotal,s.currency)}</b></p><p><span>KDV</span><b>{money(s.vatTotal,s.currency)}</b></p><p className="grand"><span>Genel toplam</span><b>{money(s.grandTotal,s.currency)}</b></p><p><span>Yeni peşinat</span><b>{money(s.downPayment,s.currency)}</b></p><p><span>Cari avansından mahsup</span><b>{money(s.advanceAmount,s.currency)}</b></p><p><span>Sipariş notu</span><b>{s.note||"—"}</b></p><p><span>Ödeme şekli</span><b>{paymentTypeLabel(s.paymentMethod)}</b></p><p><span>Onay yetkilisi</span><b>{s.approvalAssignee||"Belirlenmedi"}</b></p><Status value={s.status}/></aside></div><section className="panel sale-schedule"><PanelTitle title="Ödeme ve vade planı"/><div className="compact-list">{data.schedule.map(x=><div key={x.sequenceNo}><span><b>{x.sequenceNo}. ödeme · {paymentTypeLabel(x.paymentType)}</b><small>{dateOnly(x.dueDate)}</small></span><strong>{money(x.amount,x.currency)}<small>{x.paidAmount?`${money(x.paidAmount,x.currency)} ödendi`:"Ödeme bekleniyor"}</small></strong><Status value={x.status}/></div>)}</div></section></>;
 }
 
-function NewSale() {
+function CatalogPager({page,total,pageSize,onChange}:{page:number;total:number;pageSize:number;onChange:(page:number)=>void}) {
+  const pages=Math.max(1,Math.ceil(total/pageSize));
+  return <nav className="catalog-pager" aria-label="Ürün sayfaları"><span>{total?`${(page-1)*pageSize+1}–${Math.min(page*pageSize,total)} / ${total} ürün`:"0 ürün"}</span><div><button type="button" className="mini-btn" disabled={page<=1} onClick={()=>onChange(page-1)}>Önceki</button><b aria-live="polite">{page} / {pages}</b><button type="button" className="mini-btn" disabled={page>=pages} onClick={()=>onChange(page+1)}>Sonraki</button></div></nav>;
+}
+
+const partCategoryLabels:Record<string,string>={STANDARD:"Standart parça",READY:"Hazır parça",SEMI_FINISHED:"Yarı mamul",OTHER:"Diğer parça"};
+function SpareParts({user}:{user:User}) {
+  const [products,setProducts]=useState<Product[]>([]);
+  const [orders,setOrders]=useState<Sale[]>([]);
+  const [search,setSearch]=useState("");
+  const [page,setPage]=useState(1);
+  const [category,setCategory]=useState("");
+  const [error,setError]=useState("");
+  const [busy,setBusy]=useState(false);
+  const [showForm,setShowForm]=useState(false);
+  const [part,setPart]=useState({code:"",name:"",partCategory:"STANDARD",unit:"Adet",unitPrice:0,vatRate:20,stockQuantity:0});
+  const load=useCallback(()=>Promise.all([api<Product[]>("/products"),api<Sale[]>("/sales")]).then(([p,s])=>{setProducts(p.filter(x=>x.partCategory!=="MACHINE"));setOrders(s.filter(x=>x.orderKind==="SPARE_PART"));}),[]);
+  useEffect(()=>{load().catch(e=>setError(e.message));},[load]);
+  const filteredProducts=products.filter(p=>(!category||p.partCategory===category)&&`${p.code} ${p.name}`.toLocaleLowerCase("tr").includes(search.trim().toLocaleLowerCase("tr")));
+  const currentPage=Math.min(page,Math.max(1,Math.ceil(filteredProducts.length/10)));
+  const visibleProducts=filteredProducts.slice((currentPage-1)*10,currentPage*10);
+  const canWrite=["SALES","ADMIN"].includes(user.role);
+  const submit=async(id:number)=>{try{await api(`/sales/${id}/submit`,{method:"POST"});await load();}catch(e){setError((e as Error).message);}};
+  const save=async(e:FormEvent)=>{e.preventDefault();setBusy(true);setError("");try{await api("/products/parts",{method:"POST",body:JSON.stringify(part)});setShowForm(false);setPart({...part,code:"",name:""});await load();}catch(e){setError((e as Error).message);}finally{setBusy(false);}};
+  return <><PageHead eyebrow="PARÇA VE SİPARİŞ" title="Yedek Parçalar" description="Cari siparişlerini oluşturun, onaya gönderin ve sevkiyat akışında takip edin." action={canWrite?<NavLink className="primary-btn" to="/yedek-parcalar/yeni"><Plus/>Yeni parça siparişi</NavLink>:undefined}/>
+    <div className="receipt-context general"><b>Parça kaynağı: yerel kayıt</b><span>Harici API bağlantısı henüz kurulmadı. Standart parça, hazır parça ve yarı mamul kayıtları daha sonra kaynak sistem ile eşleştirilebilir.</span></div>
+    {error&&<div className="error-box">{error}</div>}
+    <section className="panel"><PanelTitle title="Parça kataloğu"/>
+      <div className="form-grid"><label className="field"><span>Parça ara</span><input value={search} onChange={e=>{setSearch(e.target.value);setPage(1);}} placeholder="Kod veya ad"/></label><label className="field"><span>Tür</span><select value={category} onChange={e=>{setCategory(e.target.value);setPage(1);}}><option value="">Tüm parçalar</option>{Object.entries(partCategoryLabels).map(([k,v])=><option key={k} value={k}>{v}</option>)}</select></label>{canWrite&&<button className="mini-btn" onClick={()=>setShowForm(!showForm)}>Yerel parça ekle</button>}</div>
+      {showForm&&<form onSubmit={save} className="form-grid">{(["code","name","unit"] as const).map(k=><label className="field" key={k}><span>{{code:"Parça kodu",name:"Parça adı",unit:"Birim"}[k]}</span><input required value={part[k]} onChange={e=>setPart({...part,[k]:e.target.value})}/></label>)}<label className="field"><span>Parça türü</span><select value={part.partCategory} onChange={e=>setPart({...part,partCategory:e.target.value})}>{Object.entries(partCategoryLabels).map(([k,v])=><option key={k} value={k}>{v}</option>)}</select></label>{(["unitPrice","vatRate","stockQuantity"] as const).map(k=><label className="field" key={k}><span>{{unitPrice:"Birim fiyat (TL)",vatRate:"KDV (%)",stockQuantity:"Stok miktarı"}[k]}</span><input required type="number" min="0" max={k==="vatRate"?100:undefined} step="0.01" value={part[k]} onChange={e=>setPart({...part,[k]:Number(e.target.value)})}/></label>)}<button className="primary-btn" disabled={busy}>{busy?"Kaydediliyor…":"Parçayı kaydet"}</button></form>}
+      <div className="table-wrap"><table><thead><tr><th>Kod / Parça</th><th>Tür</th><th>Stok</th><th>Birim fiyat</th></tr></thead><tbody>{visibleProducts.map(p=><tr key={p.id}><td><b>{p.name}</b><small>{p.code}</small></td><td>{partCategoryLabels[p.partCategory]}</td><td>{p.stockQuantity} {p.unit}</td><td>{money(p.unitPrice)}</td></tr>)}{!filteredProducts.length&&<tr><td colSpan={4}>{products.length?"Aramanıza uygun parça bulunamadı.":"Henüz parça kaydı yok."}</td></tr>}</tbody></table></div>
+      <CatalogPager page={currentPage} total={filteredProducts.length} pageSize={10} onChange={setPage}/>
+    </section><section className="panel"><PanelTitle title="Carilerin yedek parça siparişleri"/><SaleTable sales={orders} action={canWrite?submit:undefined}/></section></>;
+}
+
+function NewSale({spare=false}:{spare?:boolean}) {
+  const {id:editId}=useParams();
+  const [productSearch,setProductSearch]=useState("");
+  const [productPage,setProductPage]=useState(1);
+  const [productGroup,setProductGroup]=useState("");
+  const [productSubgroup,setProductSubgroup]=useState("");
+  const [searchParams]=useSearchParams();
+  const [orderKind,setOrderKind]=useState(spare?"SPARE_PART":"MACHINE");
+  const [advanceAmount,setAdvanceAmount]=useState(0);
+  const [note,setNote]=useState("");
   type Assignee={id:number;name:string;email:string};
   type Config = {
     rates: {
@@ -1125,7 +1186,7 @@ function NewSale() {
   const [config, setConfig] = useState<Config>({ rates: [] });
   const [assignees,setAssignees]=useState<Assignee[]>([]);
   const [approvalAssigneeId,setApprovalAssigneeId]=useState(0);
-  const [customerId, setCustomerId] = useState(0);
+  const [customerId, setCustomerId] = useState(()=>Number(searchParams.get("customerId"))||0);
   const [lines, setLines] = useState<
     { productId: number; quantity: number; unitPrice: number; vatRate: number }[]
   >([]);
@@ -1152,8 +1213,27 @@ function NewSale() {
       setProducts(p);
       setConfig(conf);
       setAssignees(approvers);setApprovalAssigneeId(approvers[0]?.id||0);
-    });
-  }, []);
+      if(editId) return api<{sale:{customerId:number;status:string;paymentMethod:string;downPayment:number;advanceAmount:number;currency:string;exchangeRate:number;approvalAssigneeId:number;instrumentType:string;orderKind:string;note:string};items:{productId:number;quantity:number;unitPrice:number;vatRate:number}[];schedule:{sequenceNo:number;dueDate:string;amount:number}[]}>(`/sales/${editId}/detail`).then(d=>{
+        if(!["DRAFT","REVISION_REQUESTED"].includes(d.sale.status)) throw new Error("Bu sipariş düzenlenemez.");
+        setCustomerId(d.sale.customerId);setPayment(d.sale.paymentMethod);setDown(d.sale.downPayment);setAdvanceAmount(d.sale.advanceAmount);setCurrency(d.sale.currency);setExchangeRate(d.sale.exchangeRate);setApprovalAssigneeId(d.sale.approvalAssigneeId||approvers[0]?.id||0);setInstrumentType(d.sale.instrumentType||"CHECK");setOrderKind(d.sale.orderKind);setNote(d.sale.note||"");setLines(d.items.map(({productId,quantity,unitPrice,vatRate})=>({productId,quantity,unitPrice,vatRate})));
+        const plan=d.schedule.filter(x=>x.sequenceNo>0).map(({dueDate,amount})=>({dueDate,amount}));setPaymentSchedule(plan.length?plan:[{dueDate:addDaysToToday(30),amount:0}]);setInstrumentCount(plan.length||1);setTermInstallmentCount(plan.length||1);
+      });
+    }).catch(e=>setError(e.message));
+  }, [editId]);
+  const machineGroups=Array.from(new Set(products.filter(p=>p.partCategory==="MACHINE"&&p.productGroup).map(p=>p.productGroup!)));
+  const activeProductGroup=productGroup||machineGroups[0]||"";
+  const machineSubgroups=Array.from(new Set(products.filter(p=>p.partCategory==="MACHINE"&&p.productGroup===activeProductGroup&&p.productSubgroup).map(p=>p.productSubgroup!)));
+  const activeProductSubgroup=productSubgroup&&machineSubgroups.includes(productSubgroup)?productSubgroup:machineSubgroups[0]||"";
+  const normalizedProductSearch=productSearch.trim().toLocaleLowerCase("tr");
+  const matchingProducts=products.filter(p=>{
+    const correctKind=orderKind==="SPARE_PART"?p.partCategory!=="MACHINE":p.partCategory==="MACHINE";
+    const correctGroup=orderKind==="SPARE_PART"||Boolean(normalizedProductSearch)||p.productGroup===activeProductGroup;
+    const correctSubgroup=orderKind==="SPARE_PART"||Boolean(normalizedProductSearch)||!activeProductSubgroup||p.productSubgroup===activeProductSubgroup;
+    const searchable=`${p.code} ${p.manufacturerModel||""} ${p.productGroup||""} ${p.productSubgroup||""} ${p.name}`.toLocaleLowerCase("tr");
+    return correctKind&&correctGroup&&correctSubgroup&&searchable.includes(normalizedProductSearch);
+  });
+  const pickerPage=Math.min(productPage,Math.max(1,Math.ceil(matchingProducts.length/8)));
+  const pickerProducts=matchingProducts.slice((pickerPage-1)*8,pickerPage*8);
   const customer = customers.find((c) => c.id === customerId);
   const detail = lines
     .map((l) => ({
@@ -1166,13 +1246,23 @@ function NewSale() {
   const subtotal = detail.reduce((s, l) => s + l.unitPrice * l.quantity, 0);
   const total = detail.reduce(
     (s, l) =>
-      s + l.unitPrice * l.quantity * (1 + l.vatRate / 100),
+      s + Number((Number((l.unitPrice * l.quantity).toFixed(2)) * (1 + l.vatRate / 100)).toFixed(2)),
     0,
   );
+  const availableAdvance = Math.max(0, -(customer?.balance || 0));
+  const maxAdvance = exchangeRate > 0 ? Math.max(0, Math.min(Number((total-down).toFixed(2)), Math.floor(availableAdvance/exchangeRate*100)/100)) : 0;
+  const remainingPayment = Number((total-down-advanceAmount).toFixed(2));
+  const fullyFromAdvance = total > 0 && down === 0 && remainingPayment === 0 && advanceAmount > 0;
+  const invalidAdvance = advanceAmount < 0 || advanceAmount > maxAdvance;
+  const changeAdvance = (value: number) => {
+    setAdvanceAmount(value);
+    // Preserve custom multi-row plans; a single installment can track the remaining payment directly.
+    setPaymentSchedule(rows => rows.length === 1 ? [{...rows[0],amount:Math.max(0,Number((total-down-value).toFixed(2)))}] : rows);
+  };
   const addProduct = (id: number) => {
     const selectedProduct = products.find((p) => p.id === id)!;
     if (!lines.length) {
-      const initialPrice = convertedPrice(selectedProduct);
+      const initialPrice = selectedProduct.manualPrice ? 0 : convertedPrice(selectedProduct);
       setPaymentSchedule((current) => [{
         ...current[0],
         amount: Number((initialPrice * (1 + selectedProduct.vatRate / 100)).toFixed(2)),
@@ -1189,10 +1279,8 @@ function NewSale() {
             {
               productId: id,
               quantity: 1,
-              unitPrice: Number(
-                convertedPrice(selectedProduct).toFixed(4),
-              ),
-              vatRate: 10,
+              unitPrice: selectedProduct.manualPrice ? 0 : Number(convertedPrice(selectedProduct).toFixed(4)),
+              vatRate: selectedProduct.vatRate,
             },
           ];
     });
@@ -1207,7 +1295,7 @@ function NewSale() {
   };
   const rebuildSchedule = (count: number) => {
     const safeCount = Math.max(1, Math.min(24, count));
-    const remaining = Math.max(0, total - down);
+    const remaining = Math.max(0, total - down - advanceAmount);
     const base = Math.floor((remaining / safeCount) * 100) / 100;
     setPaymentSchedule(
       Array.from({ length: safeCount }, (_, index) => ({
@@ -1226,31 +1314,33 @@ function NewSale() {
     setError("");
     setBusy(true);
     try {
-      await api("/sales", {
-        method: "POST",
+      await api(editId ? `/sales/${editId}` : "/sales", {
+        method: editId ? "PUT" : "POST",
         body: JSON.stringify({
           customerId,
-          paymentMethod: payment,
+          orderKind,
+          advanceAmount,
+          paymentMethod: fullyFromAdvance ? "TERM" : payment,
           paymentTermDays: customer?.paymentTermDays || 30,
           downPayment: down,
           currency,
           exchangeRate,
           approvalAssigneeId:approvalAssigneeId||undefined,
           termInstallmentCount,
-          instrumentType: ["CHECK", "MIXED"].includes(payment)
+          instrumentType: !fullyFromAdvance && ["CHECK", "MIXED"].includes(payment)
             ? instrumentType
             : undefined,
-          instrumentCount: ["CHECK", "MIXED"].includes(payment)
+          instrumentCount: !fullyFromAdvance && ["CHECK", "MIXED"].includes(payment)
             ? instrumentCount
             : 0,
-          paymentSchedule: ["CHECK", "MIXED", "TERM"].includes(payment)
+          paymentSchedule: total-down-advanceAmount>0.01 && ["CHECK", "MIXED", "TERM"].includes(payment)
             ? paymentSchedule
             : undefined,
-          note: "",
+          note,
           items: lines,
         }),
       });
-      navigate("/satislar");
+      navigate(orderKind==="SPARE_PART"?"/yedek-parcalar":"/satislar");
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -1261,9 +1351,10 @@ function NewSale() {
     <form onSubmit={save}>
       <PageHead
         eyebrow="YENİ İŞLEM"
-        title="Yeni satış oluştur"
-        description="Müşteriyi ve ürünleri seçin; satış fiyatını ve esnek vade planını belirleyin."
+        title={editId ? "Sipariş formunu düzenle" : orderKind==="SPARE_PART" ? "Yedek parça siparişi oluştur" : "Ana mamul siparişi oluştur"}
+        description="Müşteriyi ve ürünleri seçin; sipariş fiyatını ve esnek vade planını belirleyin."
       />
+      <ScreenGuide title="Siparişi müşteri, ürün ve ödeme sırasıyla hazırlayın." steps={["Müşteriyi seçip bakiye ve risk bilgisini kontrol edin.","Ürünleri ekleyin; miktar, birim fiyat ve KDV oranını doğrulayın.","Peşinat ile vade planını düzenleyip doğru yetkiliye gönderilecek taslağı oluşturun."]} note="Peşinat toplam sipariş tutarını aşamaz. Her vade tarihi ve tutarı gerektiğinde ayrı ayrı değiştirilebilir."/>
       <div className="stepper">
         <span className="active">
           1 <b>Müşteri</b>
@@ -1321,13 +1412,15 @@ function NewSale() {
           <section className="panel form-section">
             <div className="section-number">2</div>
             <div className="section-content">
-              <h2>Ürünleri ekleyin</h2>
-              <p>
-                Ürün kartındaki fiyat başlangıç değeri olarak gelir; bu satışa
-                özel birim fiyatı elle değiştirebilirsiniz.
-              </p>
+              <h2>Sipariş türü ve ürün seçimi</h2>
+              <div className="choice-grid" role="group" aria-label="Sipariş türü">
+                {([["MACHINE","Ana mamul"],["SPARE_PART","Yedek parça"]] as const).map(([kind,label])=><label key={kind} className={orderKind===kind?"selected":""}><input type="radio" name="orderKind" value={kind} checked={orderKind===kind} disabled={lines.length>0&&orderKind!==kind} onChange={()=>{setOrderKind(kind);setProductSearch("");setProductGroup("");setProductSubgroup("");setProductPage(1);setAdvanceAmount(0);setDown(0);setPaymentSchedule([{dueDate:addDaysToToday(30),amount:0}]);setInstrumentCount(1);setTermInstallmentCount(1);}}/><span>{label}</span><CheckCircle2/></label>)}
+              </div>
+              <p>{orderKind==="MACHINE"?"Önce ürün ailesini, ardından satılacak modeli seçin. Ana mamul fiyatı siparişte elle girilir ve KDV otomatik %10 hesaplanır.":"Yedek parçalar: standart parça, hazır parça, yarı mamul ve diğer parçalar."}{lines.length>0&&" Sipariş türünü değiştirmek için önce eklenen ürünleri kaldırın."}</p>
+              {orderKind==="MACHINE"&&<><div className="machine-groups" role="group" aria-label="Ürün ailesi">{machineGroups.map(group=><button type="button" className={activeProductGroup===group&&!normalizedProductSearch?"active":""} onClick={()=>{setProductGroup(group);setProductSubgroup("");setProductSearch("");setProductPage(1);}} key={group}>{group}<small>{products.filter(p=>p.partCategory==="MACHINE"&&p.productGroup===group).length} model</small></button>)}</div>{machineSubgroups.length>0&&<div className="machine-subgroups" role="group" aria-label={`${activeProductGroup} alt grupları`}><b>Römork alt grubu</b><div>{machineSubgroups.map(subgroup=><button type="button" className={activeProductSubgroup===subgroup&&!normalizedProductSearch?"active":""} onClick={()=>{setProductSubgroup(subgroup);setProductSearch("");setProductPage(1);}} key={subgroup}>{subgroup}<small>{products.filter(p=>p.productSubgroup===subgroup).length} model</small></button>)}</div></div>}</>}
+              <label className="field catalog-search"><span>{orderKind==="MACHINE"?"Model ara":"Ürün / parça ara"}</span><input value={productSearch} onChange={e=>{setProductSearch(e.target.value);setProductPage(1);}} placeholder={orderKind==="MACHINE"?"Model adı veya katalog modeli…":"Kod, parça veya ürün adı…"}/></label>
               <div className="product-picker">
-                {products.map((p) => (
+                {pickerProducts.map((p) => (
                   <button
                     type="button"
                     onClick={() => addProduct(p.id)}
@@ -1336,16 +1429,18 @@ function NewSale() {
                     <span>
                       <b>{p.name}</b>
                       <small>
-                        {p.code} · Stok {p.stockQuantity}
+                        {p.partCategory==="MACHINE"?`${p.manufacturerModel||"Model bilgisi bekleniyor"} · ${p.productSubgroup||p.productGroup}`:`${p.code} · Stok ${p.stockQuantity}`}
                       </small>
                     </span>
                     <strong>
-                      {money(convertedPrice(p), currency)}
+                      {p.manualPrice?"Fiyatı siparişte gir":money(convertedPrice(p), currency)}
                       <Plus />
                     </strong>
                   </button>
                 ))}
               </div>
+              {!matchingProducts.length&&<EmptyInline text="Aramanıza uygun ürün bulunamadı."/>}
+              <CatalogPager page={pickerPage} total={matchingProducts.length} pageSize={8} onChange={setProductPage}/>
               {detail.length > 0 && (
                 <div className="selected-lines">
                   {detail.map((l) => (
@@ -1353,7 +1448,7 @@ function NewSale() {
                       <span>
                         <b>{l.product.name}</b>
                         <small>
-                          {l.product.code}
+                          {l.product.partCategory==="MACHINE"?`${l.product.manufacturerModel||"Model"} · ${l.product.productGroup}${l.product.productSubgroup?` / ${l.product.productSubgroup}`:""}`:l.product.code}
                         </small>
                       </span>
                       <label>
@@ -1378,7 +1473,7 @@ function NewSale() {
                           type="number"
                           value={l.quantity}
                           min="1"
-                          max={l.product.stockQuantity}
+                          max={l.product.stockTracking?l.product.stockQuantity:undefined}
                           onChange={(e) =>
                             setLines((v) =>
                               v.map((x) =>
@@ -1403,7 +1498,8 @@ function NewSale() {
                           required
                           min="0.01"
                           step="0.01"
-                          value={l.unitPrice}
+                          value={l.unitPrice||""}
+                          placeholder="Fiyat girin"
                           onChange={(e) =>
                             setLines((v) =>
                               v.map((x) =>
@@ -1424,6 +1520,7 @@ function NewSale() {
                           max="100"
                           step="0.01"
                           value={l.vatRate}
+                          readOnly={l.product.partCategory==="MACHINE"}
                           onChange={(e) =>
                             setLines((v) =>
                               v.map((x) =>
@@ -1462,10 +1559,7 @@ function NewSale() {
             <div className="section-number">3</div>
             <div className="section-content">
               <h2>Ödeme ve döviz planı</h2>
-              <p>
-                Para birimini ve tahsilat şeklini seçin; vadeler otomatik
-                oluşsun.
-              </p>
+              <p>Siparişte kullanılacak avansı belirleyin; yalnızca kalan tutar için ödeme planı oluşturun.</p>
               <div className="currency-row">
                 <label className="field">
                   <span>Para birimi</span>
@@ -1490,11 +1584,22 @@ function NewSale() {
                   />
                 </label>
               </div>
+              <section className="order-advance-box">
+                <div className="order-advance-heading"><div><h3>Avans hesabından düş</h3><p>Nakit, havale veya teslim alınmış çeklerden oluşan net cari alacak kullanılabilir.</p></div><strong>{money(availableAdvance)}<small>Kullanılabilir avans · TL</small></strong></div>
+                <label className="field"><span>Siparişte kullanılacak avans ({currency})</span><input type="number" min="0" step="0.01" max={maxAdvance} value={advanceAmount} onChange={e=>changeAdvance(Number(e.target.value))}/></label>
+                <div className="head-actions"><button type="button" className="mini-btn" disabled={!customerId||maxAdvance<=0} onClick={()=>changeAdvance(maxAdvance)}>Kullanılabilecek en yüksek tutarı uygula</button><button type="button" className="mini-btn" disabled={!advanceAmount} onClick={()=>changeAdvance(0)}>Avans kullanma</button></div>
+                {invalidAdvance&&<div className="error-box" role="alert">Bu siparişte en fazla {money(maxAdvance,currency)} avans kullanabilirsiniz.</div>}
+                <div className="order-advance-totals"><div><span>Avanstan düşülecek</span><b>{money(advanceAmount,currency)}</b>{currency!=="TRY"&&<small>{money(advanceAmount*exchangeRate)} karşılığı</small>}</div><div><span>Onay sonrası kalan avans (tahmini)</span><b>{money(Math.max(0,availableAdvance-advanceAmount*exchangeRate))}</b></div><div><span>Sipariş için kalan ödeme</span><b>{money(Math.max(0,remainingPayment),currency)}</b></div></div>
+                <small>Düşüm sipariş onaylandığında gerçekleşir. Önceden teslim alınmış çekler için yeniden çek kaydı oluşturulmaz. Bakiye onay sırasında tekrar kontrol edilir.</small>
+              </section>
+              <label className="field order-note"><span>Sipariş notu</span><textarea maxLength={500} value={note} onChange={e=>setNote(e.target.value)}/></label>
+              {fullyFromAdvance?<div className="advance-covered"><CheckCircle2/><div><b>Siparişin tamamı avanstan karşılanıyor</b><p>Yeni tahsilat, taksit veya çek planı oluşturulmayacak.</p></div></div>:<>
+              <h3>Kalan tutarın ödeme şekli</h3>
               <div className="choice-grid">
                 {[
-                  ["CASH", "Tamamı peşin"],
+                  ["CASH", advanceAmount>0?"Kalan tutar peşin":"Tamamı peşin"],
                   ["TERM", `${customer?.paymentTermDays || 30} gün vadeli`],
-                  ["CHECK", "Kıymetli evrak"],
+                  ["CHECK", "Yeni çek / senet"],
                   ["MIXED", "Peşinat + evrak"],
                 ].map(([v, l]) => (
                   <label className={payment === v ? "selected" : ""} key={v}>
@@ -1503,14 +1608,14 @@ function NewSale() {
                       name="payment"
                       value={v}
                       checked={payment === v}
-                      onChange={() => setPayment(v)}
+                      onChange={() => {setPayment(v);if(v!=="MIXED")setDown(0);}}
                     />
                     <span>{l}</span>
                     <CheckCircle2 />
                   </label>
                 ))}
               </div>
-              {payment === "TERM" && (
+              {payment === "TERM" && total-down-advanceAmount>0.01 && (
                 <>
                   <div className="instrument-plan">
                     <label className="field">
@@ -1528,7 +1633,7 @@ function NewSale() {
                   <EditablePaymentPlan
                     rows={paymentSchedule}
                     setRows={setPaymentSchedule}
-                    total={total - down}
+                    total={Math.max(0,total - down - advanceAmount)}
                     currency={currency}
                   />
                 </>
@@ -1545,7 +1650,7 @@ function NewSale() {
                   />
                 </label>{down>total&&<div className="error-box inline-warning">Peşinat genel toplamdan büyük olamaz. En fazla {money(total,currency)} girebilirsiniz.</div>}</>
               )}
-              {["CHECK", "MIXED"].includes(payment) && (
+              {["CHECK", "MIXED"].includes(payment) && total-down-advanceAmount>0.01 && (
                 <div className="instrument-plan">
                   <label className="field">
                     <span>Evrak türü</span>
@@ -1570,20 +1675,21 @@ function NewSale() {
                   <button type="button" className="mini-btn" onClick={() => rebuildSchedule(instrumentCount)}>Tutarları eşit dağıt</button>
                 </div>
               )}{" "}
-              {["CHECK", "MIXED"].includes(payment) && (
+              {["CHECK", "MIXED"].includes(payment) && total-down-advanceAmount>0.01 && (
                 <EditablePaymentPlan
                   rows={paymentSchedule}
                   setRows={setPaymentSchedule}
-                  total={total - down}
+                  total={Math.max(0,total - down - advanceAmount)}
                   currency={currency}
                 />
               )}
-              <label className="field approval-picker"><span>Onaya gönderilecek yetkili</span><select required value={approvalAssigneeId} onChange={e=>setApprovalAssigneeId(Number(e.target.value))}><option value="">Yetkili seçin…</option>{assignees.map(x=><option key={x.id} value={x.id}>{x.name} · {x.email}</option>)}</select><small>Satış hazır olduğunda onay görevi seçtiğiniz yöneticiye gönderilir.</small></label>
+              </>}
+              <label className="field approval-picker"><span>Onaya gönderilecek yetkili</span><select required value={approvalAssigneeId} onChange={e=>setApprovalAssigneeId(Number(e.target.value))}><option value="">Yetkili seçin…</option>{assignees.map(x=><option key={x.id} value={x.id}>{x.name} · {x.email}</option>)}</select><small>Sipariş hazır olduğunda onay görevi seçtiğiniz yöneticiye gönderilir.</small></label>
             </div>
           </section>
         </div>
         <aside className="summary-card">
-          <span className="eyebrow">SATIŞ ÖZETİ</span>
+          <span className="eyebrow">SİPARİŞ ÖZETİ</span>
           <h3>{customer?.name || "Müşteri seçilmedi"}</h3>
           <div>
             <span>Ara toplam</span>
@@ -1601,9 +1707,10 @@ function NewSale() {
             <span>Peşinat</span>
             <b>− {money(down, currency)}</b>
           </div>
+          <div><span>Cari avansından mahsup</span><b>− {money(advanceAmount,currency)}</b></div>
           <div>
-            <span>Vadeli kalan</span>
-            <b>{money(total - down, currency)}</b>
+            <span>Kalan ödeme</span>
+            <b>{money(Math.max(0,total - down - advanceAmount), currency)}</b>
           </div>
           {currency !== "TRY" && (
             <div>
@@ -1613,13 +1720,13 @@ function NewSale() {
           )}
           <button
             className="primary-btn full"
-            disabled={busy || !customerId || !lines.length || !approvalAssigneeId || down>total || (["TERM","CHECK","MIXED"].includes(payment) && Math.abs(planTotal-(total-down))>0.01)}
+            disabled={busy || invalidAdvance || !customerId || !lines.length || !approvalAssigneeId || down+advanceAmount>total || advanceAmount<0 || advanceAmount*exchangeRate>Math.max(0,-(customer?.balance||0))+0.01 || (["TERM","CHECK","MIXED"].includes(payment) && total-down-advanceAmount>0.01 && Math.abs(planTotal-(total-down-advanceAmount))>0.01)}
           >
-            {busy ? "Kaydediliyor…" : "Taslağı oluştur"}
+            {busy ? "Kaydediliyor…" : editId ? "Değişiklikleri kaydet" : "Taslağı oluştur"}
             <ChevronRight />
           </button>
           <small>
-            Kaydettikten sonra satışlar ekranından yönetici onayına
+            Kaydettikten sonra siparişler ekranından yönetici onayına
             gönderebilirsiniz.
           </small>
         </aside>
@@ -1698,6 +1805,7 @@ function Approvals({ user }: { user: User }) {
         title="Onaylar"
         description="Risk, tutar ve müşteri durumunu inceleyerek karar verin."
       />
+      <ScreenGuide title="Karar vermeden önce üç bilgiyi kontrol edin." steps={["Sipariş tutarını ve müşterinin mevcut bakiyesini karşılaştırın.","Sipariş sonrası risk, limitin üzerindeyse nedeni inceleyin.","Onaylayın; eksik varsa açıklama yazıp düzeltme isteyin veya reddedin."]} note="Denetçi kullanıcı yalnızca kayıtları görür; kararı yönetici verir."/>
       {message && <Toast text={message} close={() => setMessage("")} />}
       <div className="approval-list">
         {items.filter((x) => x.status === "PENDING").length ? (
@@ -1720,6 +1828,7 @@ function Approvals({ user }: { user: User }) {
                     </div>
                     <strong>{money(a.grandTotal, a.currency || "TRY")}</strong>
                   </div>
+                  <NavLink className="mini-btn" to={`/onaylar/siparis/${a.saleId}`}>Sipariş içeriğini ve ödeme planını gör</NavLink>
                   <div className="risk-bar">
                     <span>
                       <b>Mevcut bakiye</b>
@@ -1727,12 +1836,12 @@ function Approvals({ user }: { user: User }) {
                     </span>
                     <ChevronRight />
                     <span>
-                      <b>Satış sonrası TL risk</b>
-                      {money(a.balance + a.grandTotal)}
+                      <b>Sipariş sonrası TL risk</b>
+                      {money(a.balance + a.grandTotal * a.exchangeRate)}
                     </span>
                     <span
                       className={
-                        a.balance + a.grandTotal > a.riskLimit
+                        a.balance + a.grandTotal * a.exchangeRate > a.riskLimit
                           ? "danger-text"
                           : ""
                       }
@@ -1801,7 +1910,10 @@ type Shipment = {
   totalQuantity: number;
 };
 
-function Receipts({ user }: { user: User }) {
+function Receipts({ user, advanceOnly=false }: { user: User; advanceOnly?:boolean }) {
+  const [searchParams]=useSearchParams();
+  const [saving,setSaving]=useState(false);
+  const [advanceRefresh,setAdvanceRefresh]=useState(0);
   type Ledger = {
     customer: {
       id: number;
@@ -1836,12 +1948,12 @@ function Receipts({ user }: { user: User }) {
     schedules:{id:number;saleId:number;saleNumber:string;sequenceNo:number;paymentType:string;dueDate:string;amount:number;paidAmount:number;remainingAmount:number;currency:string;exchangeRate:number;status:string;instrumentId?:number;instrumentNumber?:string;instrumentStatus?:string;issuer?:string;serialNumber?:string;bankName?:string}[];
   };
   const [customers, setCustomers] = useState<Customer[]>([]);
-  const [customerId, setCustomerId] = useState(0);
+  const [customerId, setCustomerId] = useState(()=>Number(searchParams.get("customerId"))||0);
   const [ledger, setLedger] = useState<Ledger | null>(null);
   const [message, setMessage] = useState("");
   const [currency, setCurrency] = useState("TRY");
   const [rate, setRate] = useState(1);
-  const [receiptMode,setReceiptMode]=useState<"SCHEDULE"|"INSTRUMENT"|"GENERAL">("SCHEDULE");
+  const [receiptMode,setReceiptMode]=useState<"SCHEDULE"|"INSTRUMENT"|"GENERAL">(advanceOnly?"GENERAL":"SCHEDULE");
   const [scheduleId,setScheduleId]=useState(0);
   const [receiptAmount,setReceiptAmount]=useState("");
   const [receiptMethod,setReceiptMethod]=useState("BANK_TRANSFER");
@@ -1859,7 +1971,10 @@ function Receipts({ user }: { user: User }) {
   const chooseSchedule=(id:number)=>{setScheduleId(id);const selected=ledger?.schedules.find(x=>x.id===id);if(selected){setReceiptMode(["CHECK","PROMISSORY_NOTE"].includes(selected.paymentType)?"INSTRUMENT":"SCHEDULE");setCurrency(selected.currency);setRate(selected.currency==="TRY"?1:selected.exchangeRate);setReceiptAmount(String(selected.remainingAmount))}};
   const receipt = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    const values = Object.fromEntries(new FormData(e.currentTarget));
+    if(saving)return;
+    const form=e.currentTarget;
+    const values = Object.fromEntries(new FormData(form));
+    setSaving(true);
     try {
       const selected=ledger?.schedules.find(x=>x.id===scheduleId);
       const result = receiptMode==="INSTRUMENT"&&selected?.instrumentId?await api<{message:string}>(`/instruments/${selected.instrumentId}/movements`,{method:"POST",body:JSON.stringify({status:"COLLECTED",movementDate:values.receiptDate,exchangeRate:currency==="TRY"?1:rate})}):receiptMode==="GENERAL"&&receiptMethod==="CHECK"?await api<{message:string}>("/instruments/intake",{method:"POST",body:JSON.stringify({customerId,amount:Number(receiptAmount),currency,exchangeRate:rate,...generalCheck,note:values.note})}):await api<{ message: string }>("/receipts", {
@@ -1878,11 +1993,11 @@ function Receipts({ user }: { user: User }) {
       });
       setMessage(result.message);
       load();
-      e.currentTarget.reset();
+      form.reset();
       setScheduleId(0);setReceiptAmount("");
     } catch (err) {
       setMessage((err as Error).message);
-    }
+    } finally { setSaving(false); }
   };
   const reconcile = async () => {
     if (!ledger) return;
@@ -1927,8 +2042,8 @@ function Receipts({ user }: { user: User }) {
     <>
       <PageHead
         eyebrow="FİNANS"
-        title="Cari hesap ve tahsilat"
-        description="Müşteri ekstresini inceleyin; nakit veya banka tahsilatını doğrudan cariye işleyin."
+        title={advanceOnly?"Avanslar ve bağlantı ödemeleri":"Cari hesap ve tahsilat"}
+        description={advanceOnly?"Sipariş belli olmadan alınan ödemeyi kaydedin; kalan avansı takip edip siparişlerde kullanın.":"Müşteri ekstresini inceleyin; nakit veya banka tahsilatını doğrudan cariye işleyin."}
         action={
           ["ADMIN", "ACCOUNTING"].includes(user.role) && (
             <button className="mini-btn" onClick={tcmb}>
@@ -1937,13 +2052,15 @@ function Receipts({ user }: { user: User }) {
           )
         }
       />
+      {advanceOnly?<ScreenGuide title="Avansı girin, sipariş geldikçe kullanın." steps={["Cariyi seçip sağdaki Avans girişi formuna tutar, tarih ve ödeme yöntemini yazın.","Avansı kaydedin; kullanılabilir tutar güncellensin.","Makine veya parça siparişi açıp Cari avansından kullanılacak tutarı girin."]} note="Düşüm sipariş onaylandığında gerçekleşir. Mevcut borçlar alınan ödemeden önce kapanır; kalan net alacak avans olarak kullanılabilir."/>:(<ScreenGuide title="Ödemeyi doğru cariye ve doğru vadeye işleyin." steps={["Ödeme yapan müşteriyi seçin.","Listeden kapanacak vadeyi seçin; listede yoksa Vadeden bağımsız ödeme kullanın.","Tutarı, ödeme şeklini ve tarihi kontrol edip tahsilatı kaydedin."]} note="Müşteriden fiziksel çek aldıysanız çek bilgilerini girin; çekin bankada tahsili daha sonra Çek ve Senetler ekranından tamamlanır."/>)}
+
       {message && <Toast text={message} close={() => setMessage("")} />}
       <section className="panel ledger-selector">
         <label className="field">
           <span>Müşteri</span>
           <select
             value={customerId}
-            onChange={(e) => setCustomerId(Number(e.target.value))}
+            onChange={(e) => {setLedger(null);setCustomerId(Number(e.target.value));setScheduleId(0);setReceiptAmount("");setReceiptMode(advanceOnly?"GENERAL":"SCHEDULE");}}
           >
             <option value="">Müşteri seçin…</option>
             {customers.map((c) => (
@@ -1965,9 +2082,11 @@ function Receipts({ user }: { user: User }) {
           </>
         )}
       </section>
-      {ledger&&<section className="due-picker panel"><div className="due-picker-head"><div><span className="eyebrow">AÇIK VADELER</span><h2>Hangi ödemeyi tahsil ediyorsunuz?</h2><p>Normal taksit, çek ve senetlerin tamamı burada görünür. Vadesi gelmemiş evrak da erken tahsil edilebilir.</p></div><button className={receiptMode==="GENERAL"?"mini-btn active":"mini-btn"} onClick={()=>{setReceiptMode("GENERAL");setScheduleId(0);setReceiptAmount("")}}>Vadeden bağımsız ödeme</button></div><div className="due-options">{ledger.schedules.map(x=>{const overdue=x.dueDate<new Date().toISOString().slice(0,10);const instrument=["CHECK","PROMISSORY_NOTE"].includes(x.paymentType);return <button key={x.id} className={`${scheduleId===x.id&&receiptMode!=="GENERAL"?"selected":""} ${overdue?"overdue":""}`} onClick={()=>chooseSchedule(x.id)}><span><b>{x.saleNumber} · {paymentTypeLabel(x.paymentType)}</b><small>{overdue?"Vadesi geçti":x.dueDate>new Date().toISOString().slice(0,10)&&instrument?"Erken tahsil edilebilir":"Vade"} · {dateOnly(x.dueDate)}</small>{instrument&&<small>{x.instrumentNumber||"Evrak hazırlanıyor"}</small>}</span><strong>{money(x.remainingAmount,x.currency)}<small>{x.paidAmount>0?`${money(x.paidAmount,x.currency)} ödendi`:instrument?"Evrak tutarı":"Kalan taksit"}</small></strong></button>})}{!ledger.schedules.length&&<EmptyInline text="Bu müşterinin açık taksit, çek veya senedi bulunmuyor. Serbest tahsilat kullanabilirsiniz."/>}</div></section>}
+      {!advanceOnly&&ledger&&<section className="due-picker panel"><div className="due-picker-head"><div><span className="eyebrow">AÇIK VADELER</span><h2>Hangi ödemeyi tahsil ediyorsunuz?</h2><p>Normal taksit, çek ve senetlerin tamamı burada görünür. Vadesi gelmemiş evrak da erken tahsil edilebilir.</p></div><button className={receiptMode==="GENERAL"?"mini-btn active":"mini-btn"} onClick={()=>{setReceiptMode("GENERAL");setScheduleId(0);setReceiptAmount("")}}>Vadeden bağımsız ödeme</button></div><div className="due-options">{ledger.schedules.map(x=>{const overdue=x.dueDate<new Date().toISOString().slice(0,10);const instrument=["CHECK","PROMISSORY_NOTE"].includes(x.paymentType);return <button key={x.id} className={`${scheduleId===x.id&&receiptMode!=="GENERAL"?"selected":""} ${overdue?"overdue":""}`} onClick={()=>chooseSchedule(x.id)}><span><b>{x.saleNumber} · {paymentTypeLabel(x.paymentType)}</b><small>{overdue?"Vadesi geçti":x.dueDate>new Date().toISOString().slice(0,10)&&instrument?"Erken tahsil edilebilir":"Vade"} · {dateOnly(x.dueDate)}</small>{instrument&&<small>{x.instrumentNumber||"Evrak hazırlanıyor"}</small>}</span><strong>{money(x.remainingAmount,x.currency)}<small>{x.paidAmount>0?`${money(x.paidAmount,x.currency)} ödendi`:instrument?"Evrak tutarı":"Kalan taksit"}</small></strong></button>})}{!ledger.schedules.length&&<EmptyInline text="Bu müşterinin açık taksit, çek veya senedi bulunmuyor. Serbest tahsilat kullanabilirsiniz."/>}</div></section>}
+      {advanceOnly&&ledger&&<section className="panel advance-panel"><div className="advance-balance"><span>Kullanılabilir avans</span><strong>{money(Math.max(0,-ledger.customer.balance))}</strong><small>Mevcut borçlardan sonra kalan net cari alacak</small></div><div className="head-actions">{user.permissions?.includes("SALES")&&<><NavLink className="primary-btn" to={`/satislar/yeni?customerId=${customerId}`}>Makine siparişinde kullan</NavLink><NavLink className="mini-btn" to={`/yedek-parcalar/yeni?customerId=${customerId}`}>Parça siparişinde kullan</NavLink></>}<NavLink className="mini-btn" to={`/musteriler/${customerId}`}>Cari detayına dön</NavLink></div>{!["ADMIN","ACCOUNTING"].includes(user.role)&&<p>Avans girişi için muhasebe veya yönetici yetkisi gerekir. Bu ekranda bakiye ve hareketleri inceleyebilirsiniz.</p>}</section>}
+      {advanceOnly&&ledger&&<CheckAdvanceHistory key={customerId} customerId={customerId} refresh={advanceRefresh}/>}
       {ledger && (
-        <div className="detail-grid ledger-layout">
+        <div className={`detail-grid ledger-layout ${advanceOnly&&receiptMethod==="CHECK"?"check-advance-layout":""}`}>
           <section className="panel">
             <PanelTitle title="Cari ekstre" />
             <div className="table-wrap">
@@ -2000,15 +2119,15 @@ function Receipts({ user }: { user: User }) {
             </div>
           </section>
           {["ADMIN", "ACCOUNTING"].includes(user.role) && (
-            <form className="panel receipt-form" onSubmit={receipt}>
-              <PanelTitle title={receiptMode==="INSTRUMENT"?"Çek / senet tahsil et":receiptMode==="SCHEDULE"?"Seçili vadeyi tahsil et":"Vadeden bağımsız tahsilat"} />
-              {receiptMode!=="GENERAL"?<div className="receipt-context">{selectedSchedule?<><small>{receiptMode==="INSTRUMENT"?"TAHSİL EDİLEN EVRAK":"TAHSİL EDİLEN VADE"}</small><b>{selectedSchedule.saleNumber} · {dateOnly(selectedSchedule.dueDate)}</b><span>Kalan: {money(selectedSchedule.remainingAmount,selectedSchedule.currency)}</span>{instrumentIncomplete&&<><span className="danger-text">Tahsilattan önce keşideci/borçlu, seri no ve banka bilgisi tamamlanmalıdır.</span><NavLink className="mini-btn" to="/kiymetli-evrak">Kıymetli Evrakta tamamla</NavLink></>}</>:<p>Yukarıdaki açık vadelerden birini seçin.</p>}</div>:<div className="receipt-context general"><b>Genel cari ödemesi</b><span>Bu ödeme belirli bir taksiti kapatmaz; yalnızca toplam müşteri borcundan düşer.</span></div>}
+            advanceOnly&&receiptMethod==="CHECK"?<CheckAdvanceForm key={customerId} customerId={customerId} onSaved={message=>{setMessage(message);load();setAdvanceRefresh(v=>v+1);}} onCancel={()=>setReceiptMethod("BANK_TRANSFER")}/>:<form className="panel receipt-form" onSubmit={receipt}>
+              <PanelTitle title={advanceOnly?"Avans girişi":receiptMode==="INSTRUMENT"?"Çek / senet tahsil et":receiptMode==="SCHEDULE"?"Seçili vadeyi tahsil et":"Vadeden bağımsız tahsilat"} />
+              {receiptMode!=="GENERAL"?<div className="receipt-context">{selectedSchedule?<><small>{receiptMode==="INSTRUMENT"?"TAHSİL EDİLEN EVRAK":"TAHSİL EDİLEN VADE"}</small><b>{selectedSchedule.saleNumber} · {dateOnly(selectedSchedule.dueDate)}</b><span>Kalan: {money(selectedSchedule.remainingAmount,selectedSchedule.currency)}</span>{instrumentIncomplete&&<><span className="danger-text">Tahsilattan önce keşideci/borçlu, seri no ve banka bilgisi tamamlanmalıdır.</span><NavLink className="mini-btn" to="/kiymetli-evrak">Kıymetli Evrakta tamamla</NavLink></>}</>:<p>Yukarıdaki açık vadelerden birini seçin.</p>}</div>:<div className="receipt-context general"><b>Genel cari ödemesi / yıllık bağlantı avansı</b><span>Sipariş belli olmadan alınan peşin ödemeyi burada kaydedin. Borcu aşan tutar cari alacak bakiyesi olur; sonraki makine ve yedek parça siparişlerinde kullanılabilir. Bağlantı yılı ve açıklamayı nota yazın.</span></div>}
               {receiptMode!=="INSTRUMENT"&&<label className="field">
                 <span>Yöntem</span>
                 <select name="method" value={receiptMethod} onChange={e=>setReceiptMethod(e.target.value)}>
                   <option value="BANK_TRANSFER">Havale / EFT</option>
                   <option value="CASH">Nakit</option>
-                  <option value="CHECK">Çek</option>
+                  <option value="CHECK">{advanceOnly?"Çek / birden fazla çek":"Çek"}</option>
                 </select>
               </label>}
               {receiptMode==="GENERAL"&&receiptMethod==="CHECK"&&<div className="check-intake-fields">
@@ -2073,11 +2192,11 @@ function Receipts({ user }: { user: User }) {
                 <input name="reference" />
               </label>}
               <label className="field">
-                <span>Not</span>
-                <input name="note" />
+                <span>{advanceOnly?"Bağlantı yılı / açıklama":"Not"}</span>
+                <input name="note" maxLength={500} placeholder={advanceOnly?"Örn. 2026 yıllık bağlantı avansı":undefined} />
               </label>
-              <button className="primary-btn full" disabled={!receiptAmount||(receiptMode!=="GENERAL"&&!scheduleId)||!!instrumentIncomplete}>
-                {receiptMode==="INSTRUMENT"?"Evrakı tahsil et":receiptMode==="SCHEDULE"?"Seçili vadeye tahsilat işle":receiptMethod==="CHECK"?"Çeki portföye al ve cariden düş":"Genel tahsilatı cariye işle"}
+              <button className="primary-btn full" disabled={saving||!receiptAmount||Number(receiptAmount)<=0||(receiptMode!=="GENERAL"&&!scheduleId)||!!instrumentIncomplete}>
+                {saving?"Kaydediliyor…":advanceOnly?"Avansı cariye kaydet":receiptMode==="INSTRUMENT"?"Evrakı tahsil et":receiptMode==="SCHEDULE"?"Seçili vadeye tahsilat işle":receiptMethod==="CHECK"?"Çeki portföye al ve cariden düş":"Genel tahsilatı cariye işle"}
               </button>
             </form>
           )}
@@ -2145,7 +2264,7 @@ function Shipments({ user }: { user: User }) {
       <PageHead
         eyebrow="OPERASYON"
         title="Sevkiyatlar"
-        description="Onaylı satışlardan planlanan, yoldaki ve tamamlanan sevkiyatları takip edin."
+        description="Onaylı siparişlerden planlanan, yoldaki ve tamamlanan sevkiyatları takip edin."
         action={
           ["ADMIN", "SHIPPING"].includes(user.role) && (
             <NavLink className="primary-btn" to="/sevkiyatlar/yeni">
@@ -2155,6 +2274,7 @@ function Shipments({ user }: { user: User }) {
           )
         }
       />
+      <ScreenGuide title="Sevkiyatın mevcut durumunu ve sıradaki adımını takip edin." steps={["Kartı açarak gönderilecek ürünleri ve adresi kontrol edin.","Araç, şoför ve gerekiyorsa irsaliye numarasını girin.","Yalnızca gerçekleşen durumu seçip kaydedin."]} note="‘Henüz düzenlenmedi’ irsaliye numarasının daha girilmediğini gösterir; sevke çıkışta numara eklenir."/>
       {message && <Toast text={message} close={() => setMessage("")} />}
       <div className="metric-grid shipment-metrics">
         <Metric
@@ -2403,24 +2523,25 @@ function NewShipment() {
       <PageHead
         eyebrow="YENİ OPERASYON"
         title="Sevkiyat oluştur"
-        description="Onaylı satışı seçin; sistem yalnızca sevk edilmemiş miktarları getirsin."
+        description="Onaylı siparişi seçin; sistem yalnızca sevk edilmemiş miktarları getirsin."
       />
+      <ScreenGuide title="Siparişten sevk edilecek miktarı oluşturun." steps={["Onaylanmış siparişi seçin.","Gönderilecek ürün miktarlarını kontrol edin; parçalı sevkiyatsa azaltın.","Tarih ve teslimat adresini yazıp sevkiyatı oluşturun."]}/>
       {error && <div className="error-box">{error}</div>}
       <div className="form-layout">
         <div className="form-main">
           <section className="panel form-section">
             <div className="section-number">1</div>
             <div className="section-content">
-              <h2>Onaylı satış</h2>
-              <p>Sevki bekleyen satışlar listelenir.</p>
+              <h2>Onaylı sipariş</h2>
+              <p>Sevki bekleyen siparişler listelenir.</p>
               <label className="field">
-                <span>Satış seçin</span>
+                <span>Sipariş seçin</span>
                 <select
                   required
                   value={saleId}
                   onChange={(e) => setSaleId(Number(e.target.value))}
                 >
-                  <option value="">Satış seçin…</option>
+                  <option value="">Sipariş seçin…</option>
                   {plans.map((x) => (
                     <option value={x.id} key={x.id}>
                       {x.number} · {x.customerName} · {x.remainingQuantity}{" "}
@@ -2522,9 +2643,9 @@ function NewShipment() {
         </div>
         <aside className="summary-card">
           <span className="eyebrow">SEVKİYAT ÖZETİ</span>
-          <h3>{detail?.sale.customerName || "Satış seçilmedi"}</h3>
+          <h3>{detail?.sale.customerName || "Sipariş seçilmedi"}</h3>
           <div>
-            <span>Satış</span>
+            <span>Sipariş</span>
             <b>{detail?.sale.number || "—"}</b>
           </div>
           <div className="total">
@@ -2541,7 +2662,7 @@ function NewShipment() {
             <ChevronRight />
           </button>
           <small>
-            Satış miktarından fazla sevkiyat sunucu tarafından engellenir.
+            Sipariş miktarından fazla sevkiyat sunucu tarafından engellenir.
           </small>
         </aside>
       </div>
@@ -2928,7 +3049,7 @@ function Instruments({ user }: { user: User }) {
               )}{" "}
               {expanded && item.status === "COLLECTED" && item.collectionRate && (
                 <div className="collection-summary">
-                  <span><small>Kayıt / satış kuru</small><b>{item.currency === "TRY" ? "1,0000" : item.exchangeRate.toLocaleString("tr-TR", { minimumFractionDigits: 4 })}</b></span>
+                  <span><small>Kayıt / sipariş kuru</small><b>{item.currency === "TRY" ? "1,0000" : item.exchangeRate.toLocaleString("tr-TR", { minimumFractionDigits: 4 })}</b></span>
                   <span><small>Tahsilat tarihi</small><b>{dateOnly(item.collectionDate!)}</b></span>
                   <span><small>Tahsilat kuru</small><b>{item.collectionRate.toLocaleString("tr-TR", { minimumFractionDigits: 4 })}</b></span>
                   <span><small>Tahsil edilen TL</small><b>{money(item.collectedTryAmount || 0)}</b></span>
@@ -3086,7 +3207,7 @@ function EDocuments({ user }: { user: User }) {
     }
   };
   const createDocument = async () => {
-    if (!sourceId) return setMessage("Onaylanmış bir satış seçin.");
+    if (!sourceId) return setMessage("Onaylanmış bir sipariş seçin.");
     try {
       const result = await api<{ message: string }>("/e-documents", {
         method: "POST",
@@ -3112,6 +3233,7 @@ function EDocuments({ user }: { user: User }) {
         title="e-Belgeler"
         description="e-Fatura, e-Arşiv ve e-İrsaliye taleplerini sağlayıcı durumlarıyla izleyin."
       />
+      <ScreenGuide title="Onaylanan sipariş için elektronik belge talebi oluşturun." steps={["Önce belge sağlayıcısının tanımlı olduğunu kontrol edin.","Onaylanmış siparişi ve doğru belge türünü seçin.","Talebi oluşturun; resmî numara gelene kadar durumunu listeden takip edin."]} note="e-Fatura kurumsal alıcıya, e-Arşiv e-Fatura kullanmayan alıcıya, e-İrsaliye ise sevkiyata eşlik eden belgeye yöneliktir."/>
       {message && <Toast text={message} close={() => setMessage("")} />}
       <section className="provider-card">
         <div>
@@ -3136,12 +3258,12 @@ function EDocuments({ user }: { user: User }) {
       {user.role !== "AUDITOR" && (
         <section className="document-create">
           <label className="field">
-            <span>Onaylı satış</span>
+            <span>Onaylı sipariş</span>
             <select
               value={sourceId}
               onChange={(e) => setSourceId(Number(e.target.value))}
             >
-              <option value="">Satış seçin…</option>
+              <option value="">Sipariş seçin…</option>
               {sales.map((s) => (
                 <option value={s.id} key={s.id}>
                   {s.number} · {s.customerName} ·{" "}
@@ -3160,6 +3282,7 @@ function EDocuments({ user }: { user: User }) {
               <option value="E_ARCHIVE">e-Arşiv Fatura</option>
               <option value="E_DISPATCH">e-İrsaliye</option>
             </select>
+            <small className="field-help">{documentType==="E_INVOICE"?"e-Fatura mükellefi kurumsal alıcı için.":documentType==="E_ARCHIVE"?"e-Fatura kullanmayan alıcı için.":"Mal sevkiyatına eşlik eden elektronik irsaliye."}</small>
           </label>
           <button className="primary-btn" onClick={createDocument}>
             <Plus />
@@ -3215,7 +3338,7 @@ function EDocuments({ user }: { user: User }) {
 function UserPermissions({currentUser}:{currentUser:User}){
   type ManagedUser=User&{active:boolean;permissions:string[]};
   type Response={permissions:string[];users:ManagedUser[]};
-const labels:Record<string,{title:string;description:string}>={DASHBOARD:{title:"Ana Sayfa",description:"Günlük özet ve bildirimler"},CUSTOMERS:{title:"Cariler",description:"Müşteri, bayi ve tedarikçi cari kartları"},SALES:{title:"Satışlar",description:"Satış listesi ve yeni satış"},INSTRUMENTS:{title:"Kıymetli Evrak",description:"Çek ve senet işlemleri"},RECEIPTS:{title:"Cari ve Tahsilat",description:"Cari ekstre, vadeler ve tahsilat"},APPROVALS:{title:"Onaylar",description:"Onay, ret ve düzeltme kararları"},SHIPMENTS:{title:"Sevkiyatlar",description:"Sevkiyat planlama ve teslimat"},EDOCUMENTS:{title:"e-Belgeler",description:"e-Fatura, e-Arşiv ve e-İrsaliye"},AUDIT:{title:"Denetim Kayıtları",description:"Değiştirilemez işlem geçmişi"},SECURITY:{title:"Hesap Güvenliği",description:"2FA, passkey ve cihazlar"},USER_MANAGEMENT:{title:"Kullanıcı Yetkileri",description:"Kullanıcı ekran erişimlerini yönetme"}};
+const labels:Record<string,{title:string;description:string}>={DASHBOARD:{title:"Ana Sayfa",description:"Günlük özet ve bildirimler"},CUSTOMERS:{title:"Cariler",description:"Müşteri, bayi ve tedarikçi cari kartları"},SALES:{title:"Siparişler",description:"Sipariş listesi ve yeni sipariş"},INSTRUMENTS:{title:"Çek ve Senetler",description:"Çek ve senet işlemleri"},RECEIPTS:{title:"Tahsilatlar",description:"Cari ekstre, vadeler ve alınan ödemeler"},APPROVALS:{title:"Onaylar",description:"Onay, ret ve düzeltme kararları"},SHIPMENTS:{title:"Sevkiyatlar",description:"Sevkiyat planlama ve teslimat"},EDOCUMENTS:{title:"e-Belgeler",description:"e-Fatura, e-Arşiv ve e-İrsaliye"},AUDIT:{title:"İşlem Geçmişi",description:"Değiştirilemez işlem geçmişi"},SECURITY:{title:"Güvenlik",description:"İki aşamalı doğrulama, passkey ve cihazlar"},USER_MANAGEMENT:{title:"Kullanıcı Yetkileri",description:"Kullanıcı ekran erişimlerini yönetme"}};
   const [data,setData]=useState<Response|null>(null);const [selectedId,setSelectedId]=useState(0);const [draft,setDraft]=useState<string[]>([]);const [message,setMessage]=useState("");
   const load=useCallback(()=>api<Response>("/admin/users").then(result=>{setData(result);const id=selectedId||result.users.find(x=>x.role!=="ADMIN")?.id||result.users[0]?.id||0;setSelectedId(id);setDraft(result.users.find(x=>x.id===id)?.permissions||[])}),[selectedId]);
   useEffect(()=>{if(currentUser.role==="ADMIN")load()},[currentUser.role,load]);
@@ -3225,7 +3348,7 @@ const labels:Record<string,{title:string;description:string}>={DASHBOARD:{title:
   const selectUser=(id:number)=>{setSelectedId(id);setDraft(data.users.find(x=>x.id===id)?.permissions||[]);setMessage("")};
   const toggle=(key:string)=>setDraft(draft.includes(key)?draft.filter(x=>x!==key):[...draft,key]);
   const save=async()=>{if(!selected)return;try{const result=await api<{message:string}>(`/admin/users/${selected.id}/permissions`,{method:"PUT",body:JSON.stringify({permissions:draft})});setMessage(result.message);const users=data.users.map(x=>x.id===selected.id?{...x,permissions:draft}:x);setData({...data,users})}catch(e){setMessage((e as Error).message)}};
-  return <><PageHead eyebrow="YÖNETİM" title="Kullanıcı yetkileri" description="Kullanıcının sol menüde göreceği ve erişebileceği modülleri belirleyin."/>{message&&<Toast text={message} close={()=>setMessage("")}/>}<div className="permission-layout"><section className="panel permission-users"><PanelTitle title="Kullanıcılar"/><div>{data.users.map(user=><button className={selectedId===user.id?"selected":""} onClick={()=>selectUser(user.id)} key={user.id}><span className="avatar">{user.name.split(" ").map(x=>x[0]).join("").slice(0,2)}</span><span><b>{user.name}</b><small>{roleLabels[user.role]} · {user.email}</small></span><em>{user.permissions.length} ekran</em></button>)}</div></section><section className="panel permission-editor"><div className="permission-head"><div><span className="eyebrow">ERİŞİM AYARLARI</span><h2>{selected?.name}</h2><p>{isAdmin?"Yönetici hesapları güvenlik nedeniyle bütün ekranlara erişir.":"İşaretlenen ekranlar kullanıcının sol menüsünde görünür."}</p></div><button className="primary-btn" disabled={isAdmin} onClick={save}>Yetkileri kaydet</button></div><div className="permission-grid">{data.permissions.map(key=>{const meta=labels[key]||{title:key,description:""};const checked=isAdmin||draft.includes(key);return <label className={checked?"checked":""} key={key}><input type="checkbox" checked={checked} disabled={isAdmin} onChange={()=>toggle(key)}/><span><b>{meta.title}</b><small>{meta.description}</small></span><CheckCircle2/></label>})}</div><div className="permission-note"><ShieldCheck/><span><b>Sunucu koruması etkin</b><small>Menüde gizlenen bir ekrana adres yazarak veya doğrudan API isteğiyle erişilemez. Rolün izin vermediği işlem, ekran seçilmiş olsa bile açılamaz.</small></span></div></section></div></>
+  return <><PageHead eyebrow="YÖNETİM" title="Kullanıcı yetkileri" description="Kullanıcının sol menüde göreceği ve erişebileceği modülleri belirleyin."/><ScreenGuide title="Bir çalışanın görebileceği ekranları seçin." steps={["Soldan çalışanı seçin.","Kullanması gereken ekranları işaretleyin.","Yetkileri kaydet düğmesine basın."]} note="Yönetici hesaplarının erişimi kapatılamaz. Ekranı açmak, kullanıcının rolü dışındaki kritik işlemleri yapmasına izin vermez."/>{message&&<Toast text={message} close={()=>setMessage("")}/>}<div className="permission-layout"><section className="panel permission-users"><PanelTitle title="Kullanıcılar"/><div>{data.users.map(user=><button className={selectedId===user.id?"selected":""} onClick={()=>selectUser(user.id)} key={user.id}><span className="avatar">{user.name.split(" ").map(x=>x[0]).join("").slice(0,2)}</span><span><b>{user.name}</b><small>{roleLabels[user.role]} · {user.email}</small></span><em>{user.permissions.length} ekran</em></button>)}</div></section><section className="panel permission-editor"><div className="permission-head"><div><span className="eyebrow">ERİŞİM AYARLARI</span><h2>{selected?.name}</h2><p>{isAdmin?"Yönetici hesapları güvenlik nedeniyle bütün ekranlara erişir.":"İşaretlenen ekranlar kullanıcının sol menüsünde görünür."}</p></div><button className="primary-btn" disabled={isAdmin} onClick={save}>Yetkileri kaydet</button></div><div className="permission-grid">{data.permissions.map(key=>{const meta=labels[key]||{title:key,description:""};const checked=isAdmin||draft.includes(key);return <label className={checked?"checked":""} key={key}><input type="checkbox" checked={checked} disabled={isAdmin} onChange={()=>toggle(key)}/><span><b>{meta.title}</b><small>{meta.description}</small></span><CheckCircle2/></label>})}</div><div className="permission-note"><ShieldCheck/><span><b>Sunucu koruması etkin</b><small>Menüde gizlenen bir ekrana adres yazarak veya doğrudan API isteğiyle erişilemez. Rolün izin vermediği işlem, ekran seçilmiş olsa bile açılamaz.</small></span></div></section></div></>
 }
 
 function SecuritySettings() {
@@ -3300,6 +3423,7 @@ function SecuritySettings() {
         title="Güvenlik ve cihazlar"
         description="İki aşamalı doğrulama, passkey ve açık oturumlarınızı yönetin."
       />
+      <ScreenGuide title="Hesabınızı iki basit adımla koruyun." steps={["Önce iki aşamalı doğrulamayı kurun.","Desteklenen cihazlarda hızlı giriş için passkey ekleyin.","Tanımadığınız açık cihaz oturumlarını kapatın."]}/>
       {message && <Toast text={message} close={() => setMessage("")} />}
       <div className="security-grid">
         <section className="panel security-card">
@@ -3399,9 +3523,10 @@ function AuditLogs({ user }: { user: User }) {
     <>
       <PageHead
         eyebrow="GÜVENLİK"
-        title="Denetim kayıtları"
+        title="İşlem geçmişi"
         description="Kim, neyi, ne zaman yaptı? Değiştirilemez işlem geçmişi."
       />
+      <ScreenGuide title="Sistemde yapılan değişiklikleri buradan kontrol edin." steps={["İşlemin ne olduğunu okuyun.","İşlemi yapan kullanıcıyı ve ilgili kayıt numarasını kontrol edin.","Tarih ve kısa takip koduyla gerektiğinde kaydı eşleştirin."]} note="Bu ekran yalnızca kayıtları gösterir; buradan işlem değiştirilemez veya silinemez."/>
       <section className="panel">
         <div className="audit-list">
           {logs.map((l) => (
@@ -3473,10 +3598,10 @@ function actionLabel(v: string) {
   return (
     (
       {
-        SALE_CREATED: "Satış oluşturuldu",
-        SALE_SUBMITTED: "Satış onaya gönderildi",
-        APPROVAL_APPROVED: "Satış onaylandı",
-        APPROVAL_REJECTED: "Satış reddedildi",
+        SALE_CREATED: "Sipariş oluşturuldu",
+        SALE_SUBMITTED: "Sipariş onaya gönderildi",
+        APPROVAL_APPROVED: "Sipariş onaylandı",
+        APPROVAL_REJECTED: "Sipariş reddedildi",
         APPROVAL_REVISION_REQUESTED: "Düzeltme istendi",
         ACCESS_DENIED: "Yetkisiz erişim engellendi",
       } as Record<string, string>

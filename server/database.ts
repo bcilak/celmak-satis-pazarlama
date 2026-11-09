@@ -1,3 +1,5 @@
+import { seedDemoSpareParts } from './demo-parts.ts'
+import { machineCatalog } from './machine-catalog.ts'
 import { DatabaseSync } from 'node:sqlite'
 import { mkdirSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
@@ -387,12 +389,37 @@ export function migrate() {
     );
   `)
 
+  db.exec(`CREATE TABLE IF NOT EXISTS check_advances (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id TEXT NOT NULL UNIQUE,
+    customer_id INTEGER NOT NULL REFERENCES customers(id),
+    target_amount REAL,
+    total_amount REAL NOT NULL,
+    currency TEXT NOT NULL,
+    exchange_rate REAL NOT NULL,
+    received_date TEXT NOT NULL,
+    note TEXT,
+    created_by INTEGER NOT NULL REFERENCES users(id),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`)
+  addColumn('check_advances', 'request_hash', 'TEXT')
+  addColumn('negotiable_instruments', 'check_advance_id', 'INTEGER REFERENCES check_advances(id)')
+
   addColumn('customers', 'code_source', "TEXT NOT NULL DEFAULT 'AUTO'")
   addColumn('customers', 'external_system', 'TEXT')
   addColumn('customers', 'external_id', 'TEXT')
   addColumn('products', 'inventory_source', "TEXT NOT NULL DEFAULT 'LOCAL'")
   addColumn('products', 'external_system', 'TEXT')
   addColumn('products', 'external_id', 'TEXT')
+  addColumn('products', 'part_category', "TEXT NOT NULL DEFAULT 'MACHINE'")
+  addColumn('products', 'product_group', 'TEXT')
+  addColumn('products', 'product_subgroup', 'TEXT')
+  addColumn('products', 'manufacturer_model', 'TEXT')
+  addColumn('products', 'manual_price', 'INTEGER NOT NULL DEFAULT 0')
+  addColumn('products', 'stock_tracking', 'INTEGER NOT NULL DEFAULT 1')
+  addColumn('products', 'catalog_source', 'TEXT')
+  addColumn('sales', 'order_kind', "TEXT NOT NULL DEFAULT 'MACHINE'")
+  addColumn('sales', 'advance_amount', 'REAL NOT NULL DEFAULT 0')
   addColumn('sales', 'currency', "TEXT NOT NULL DEFAULT 'TRY'")
   addColumn('sales', 'exchange_rate', 'REAL NOT NULL DEFAULT 1')
   addColumn('sales', 'exchange_rate_date', 'TEXT')
@@ -439,6 +466,16 @@ export function seed() {
   db.prepare('INSERT OR IGNORE INTO exchange_rates (currency,rate_date,rate,source) VALUES (?,?,?,?)').run('USD', '2026-08-24', 41.25, 'DEMO')
   db.prepare('INSERT OR IGNORE INTO exchange_rates (currency,rate_date,rate,source) VALUES (?,?,?,?)').run('EUR', '2026-08-24', 48.10, 'DEMO')
   db.prepare("UPDATE approvals SET assigned_to=5 WHERE status='PENDING' AND requested_by=assigned_to AND requested_by<>5").run()
+  // Replace only the original demo catalog; preserve product IDs and order links.
+  transaction(() => {
+    const renameDemo = db.prepare("UPDATE products SET code=?,name=?,unit='Adet' WHERE code=? AND name=? AND inventory_source='LOCAL' AND part_category='MACHINE' AND NOT EXISTS (SELECT 1 FROM products WHERE code=?)")
+    renameDemo.run('CLM-TMB-165', '165 Tamburlu Çayır Biçme Makinası', 'CLM-MTR-100', 'Endüstriyel Motor 100', 'CLM-TMB-165')
+    renameDemo.run('CLM-SLJ-003', '3 Sıralı Silaj Makinası', 'CLM-PMP-220', 'Santrifüj Pompa 220', 'CLM-SLJ-003')
+    renameDemo.run('CLM-KLT-001', 'Kültivatör', 'CLM-VLF-050', 'Paslanmaz Vana 50', 'CLM-KLT-001')
+    renameDemo.run('CLM-RMK-001', 'Römork', 'CLM-SRV-001', 'Kurulum ve Devreye Alma', 'CLM-RMK-001')
+  })
+  transaction(() => seedMachineCatalog())
+  transaction(() => seedDemoSpareParts(db))
   if (count > 0) { ensureSecurityAndLedger(); return }
 
   transaction(() => {
@@ -458,13 +495,38 @@ export function seed() {
     const addProduct = db.prepare(`INSERT INTO products
       (code, name, unit, unit_price, minimum_price, vat_rate, stock_quantity)
       VALUES (?, ?, ?, ?, ?, ?, ?)`)
-    addProduct.run('CLM-MTR-100', 'Endüstriyel Motor 100', 'Adet', 52000, 48000, 20, 42)
-    addProduct.run('CLM-PMP-220', 'Santrifüj Pompa 220', 'Adet', 28500, 26000, 20, 68)
-    addProduct.run('CLM-VLF-050', 'Paslanmaz Vana 50', 'Adet', 4750, 4200, 20, 240)
-    addProduct.run('CLM-SRV-001', 'Kurulum ve Devreye Alma', 'Hizmet', 18000, 15000, 20, 999)
+    addProduct.run('CLM-TMB-165', '165 Tamburlu Çayır Biçme Makinası', 'Adet', 52000, 48000, 20, 42)
+    addProduct.run('CLM-SLJ-003', '3 Sıralı Silaj Makinası', 'Adet', 28500, 26000, 20, 68)
+    addProduct.run('CLM-KLT-001', 'Kültivatör', 'Adet', 4750, 4200, 20, 240)
+    addProduct.run('CLM-RMK-001', 'Römork', 'Adet', 18000, 15000, 20, 999)
 
   })
   ensureSecurityAndLedger()
+}
+
+function seedMachineCatalog() {
+  // İlk demo ana mamulleri geçmiş siparişlerde korunur, yeni sipariş seçicisinde gösterilmez.
+  db.prepare("UPDATE products SET active=0 WHERE code IN ('CLM-TMB-165','CLM-SLJ-003','CLM-KLT-001','CLM-RMK-001') AND catalog_source IS NULL").run()
+  const upsert = db.prepare(`INSERT INTO products
+    (code,name,unit,unit_price,minimum_price,vat_rate,stock_quantity,active,inventory_source,part_category,product_group,product_subgroup,manufacturer_model,manual_price,stock_tracking,catalog_source)
+    VALUES (?,?, 'Adet',0,0,10,0,1,'LOCAL','MACHINE',?,?,?,1,0,'PRICE_LIST_2026_07_22')
+    ON CONFLICT(code) DO UPDATE SET
+      name=excluded.name,
+      unit='Adet',
+      vat_rate=10,
+      active=1,
+      part_category='MACHINE',
+      product_group=excluded.product_group,
+      product_subgroup=excluded.product_subgroup,
+      manufacturer_model=excluded.manufacturer_model,
+      manual_price=1,
+      stock_tracking=0,
+      catalog_source=excluded.catalog_source`)
+  machineCatalog.forEach((item, index) => {
+    const internalCode = `KAT-2026-${String(index + 1).padStart(4, '0')}`
+    const isTrailer = item.group.includes('Römork')
+    upsert.run(internalCode, item.name, isTrailer ? 'Römorklar' : item.group, isTrailer ? item.group : null, item.model ?? null)
+  })
 }
 
 function ensureSecurityAndLedger(){

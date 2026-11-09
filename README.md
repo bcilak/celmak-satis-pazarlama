@@ -90,3 +90,31 @@ Gerçek kimlik doğrulama ve iki aşamalı doğrulama tamamlandıktan sonra cari
 - Canlıya geçişten önce bütün başlangıç parolaları değiştirilmelidir.
 - Yerel geliştirmede parola sıfırlama bağlantısı API terminaline yazılır. Canlı ortamda e-posta sağlayıcısına teslim edilecektir.
 - Passkey `localhost` üzerinde çalışır; canlıda `WEBAUTHN_RP_ID` ve `WEBAUTHN_ORIGIN` HTTPS alan adına ayarlanmalıdır.
+
+
+## Yedek parça, bağlantı avansı ve sipariş düzenleme
+
+- **Yedek Parçalar** ekranında standart parça, hazır parça, yarı mamul ve diğer parça kaydedilebilir; cari seçilerek parça siparişi oluşturulur. Siparişler mevcut onay ve sevkiyat akışını kullanır.
+- Kaynak sitenin API bağlantısı kullanıcı talebiyle ertelenmiştir; otomatik veri aktarımı yapılmaz. Gelecek adaptör `products.part_category`, `inventory_source`, `external_system` ve `external_id` alanlarını kullanabilir. Endpoint, kimlik doğrulama, sayfalama ve alan eşlemesi API dokümanı sağlandığında belirlenecektir. Mevcut ürünler makine olarak sınıflandırılır; yerel parça kayıtları ayrı tutulur.
+- Sipariş belli olmadan alınan yıllık bağlantı ödemesi **Tahsilatlar → Genel cari ödemesi / yıllık bağlantı avansı** üzerinden nakit veya havale olarak kaydedilir. Yıl ve bağlantı açıklaması nota yazılabilir. Mevcut borçlar düşüldükten sonra kalan cari alacak bakiyesi avans olarak kullanılabilir.
+- Yeni siparişte **Cari avansından kullanılacak tutar** girilir. Kalan tutar nakit veya vade/evrak planıyla tamamlanır. Mevcut avans ikinci bir tahsilat kaydı üretmez. Avansın TL karşılığı, siparişin sabit kuru üzerinden kontrol edilir. Taslaklar bakiyeyi rezerve etmez; onay anında bakiye tekrar kontrol edilir.
+- **Düzenle** ile taslak ve düzeltme istenen siparişin cari, ürün, miktar, fiyat, KDV, not, avans ve ödeme planı değiştirilebilir. Sipariş numarası korunur, düzenleme denetim kaydına yazılır ve sipariş tekrar onaya gönderilir. Onay bekleyen veya onaylanmış sipariş doğrudan değiştirilemez.
+- Onay kartındaki **Sipariş içeriğini ve ödeme planını gör** bağlantısı ürün satırlarını, toplamları, avansı ve notu açar. Yalnızca Onaylar ekranına erişimi olan yetkililer de bu detayı okuyabilir.
+
+Akış testi (önce derleme gerekir):
+
+```bash
+npm run build
+node tests/order-workflows.mjs
+```
+
+Test, ayrı geçici veritabanında 2 milyon TL avans, makine/parça siparişleri, kısmi mahsup, düzenleme/revizyon, mükerrer onay ve yetersiz bakiye kontrollerini çalıştırır.
+
+
+### Birden fazla çek ile bağlantı avansı
+
+Avanslar ekranında cari seçildikten sonra **Yöntem → Çek / birden fazla çek** kullanılır. **Çek ekle** ile her çekin tutarı, keşidecisi, banka/seri bilgileri, düzenleme tarihi ve vadesi ayrı girilir. Aynı bağlantıda tutarlar eşit olmak zorunda değildir; para birimi ve teslim alma kuru ortaktır. Farklı para birimleri ayrı bağlantı gruplarıyla kaydedilir.
+
+İsteğe bağlı bağlantı hedefi, çek toplamıyla karşılaştırılır. Fark kaydı engellemez; cari avansa yalnızca çeklerin gerçek toplamı işlenir. Örneğin 500.000 + 500.000 + 1.000.000 + 1.000.000 TL toplam 3.000.000 TL'dir. 2.000.000 TL hedef girilirse 1.000.000 TL aşım gösterilir.
+
+Çekler tek veritabanı işlemiyle kaydedilir; hatalı veya mükerrer çek tüm grubu geri alır. Tekrar gönderilen aynı işlem anahtarı ikinci bir kayıt oluşturmaz. Çekler portföye alınır; banka tahsilatı ayrıca Çek ve Senetler ekranından yapılır. Çekli bağlantı geçmişi grup, hedef, toplam ve her çekin güncel durumunu gösterir.

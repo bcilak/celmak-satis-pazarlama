@@ -16,6 +16,9 @@ export type Customer = {
   tags?: string;
 };
 export type Product = {
+  partCategory: string;
+  inventorySource?: string;
+  externalId?: string;
   id: number;
   code: string;
   name: string;
@@ -24,8 +27,14 @@ export type Product = {
   minimumPrice: number;
   vatRate: number;
   stockQuantity: number;
+  productGroup?: string;
+  productSubgroup?: string;
+  manufacturerModel?: string;
+  manualPrice?: number;
+  stockTracking?: number;
 };
 export type Sale = {
+  orderKind: string;
   id: number;
   number: string;
   status: string;
