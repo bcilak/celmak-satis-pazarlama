@@ -1,0 +1,32 @@
+# Çelmak Sipariş Yönetimi — Docker Compose
+#
+# Kullanım:
+#   cp deploy/celmak.env.example deploy/celmak.env   # alan adını doldur
+#   docker compose up -d --build
+#   docker compose logs -f
+#
+# Uygulama konteyner içinde 3001'de dinler; host'un 127.0.0.1:3001 portuna
+# yayınlanır. Host üzerindeki Nginx (deploy/nginx-celmak.conf) bu porta reverse
+# proxy yapıp HTTPS'i yönetir. 127.0.0.1'e bağlamak, uygulamanın yalnızca
+# Nginx üzerinden dışarı açılmasını sağlar.
+
+services:
+  app:
+    build: .
+    image: celmak:latest
+    container_name: celmak
+    restart: unless-stopped
+    env_file:
+      - deploy/celmak.env
+    environment:
+      # Konteyner içi sabitler — env dosyasındaki değerleri ezer.
+      NODE_ENV: production
+      PORT: "3001"
+      DATA_DIR: /data
+    ports:
+      - "127.0.0.1:3001:3001"
+    volumes:
+      - celmak-data:/data
+
+volumes:
+  celmak-data:

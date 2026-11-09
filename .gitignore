@@ -8,3 +8,4 @@ data/
 .tmp-financial-audit/
 .tmp-prodtest/
 .claude/settings.local.json
+deploy/celmak.env

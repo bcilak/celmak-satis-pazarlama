@@ -1,0 +1,14 @@
+node_modules
+dist
+dist-server
+data
+.tmp-financial-audit
+.tmp-prodtest
+.git
+.gitignore
+.claude
+*.log
+*.tsbuildinfo
+.env
+CELMAK_TEKNIK_DOKUMANTASYON.pdf
+tests
