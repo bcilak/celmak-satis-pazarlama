@@ -5,10 +5,10 @@
 #   docker compose up -d --build
 #   docker compose logs -f
 #
-# Uygulama konteyner içinde 3001'de dinler; host'un 127.0.0.1:3001 portuna
-# yayınlanır. Host üzerindeki Nginx (deploy/nginx-celmak.conf) bu porta reverse
-# proxy yapıp HTTPS'i yönetir. 127.0.0.1'e bağlamak, uygulamanın yalnızca
-# Nginx üzerinden dışarı açılmasını sağlar.
+# Uygulama konteyner içinde 8090'de dinler; host'un 127.0.0.1:8090 portuna
+# yayınlanır. Host üzerindeki ters-proxy (bu sunucuda Apache/Virtualmin) bu
+# porta yönlendirip HTTPS'i yönetir. 127.0.0.1'e bağlamak, uygulamanın yalnızca
+# ters-proxy üzerinden dışarı açılmasını, internete doğrudan kapalı olmasını sağlar.
 
 services:
   app:
@@ -21,10 +21,10 @@ services:
     environment:
       # Konteyner içi sabitler — env dosyasındaki değerleri ezer.
       NODE_ENV: production
-      PORT: "3001"
+      PORT: "8090"
       DATA_DIR: /data
     ports:
-      - "127.0.0.1:3001:3001"
+      - "127.0.0.1:8090:8090"
     volumes:
       - celmak-data:/data
 

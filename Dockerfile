@@ -14,7 +14,7 @@ RUN npm run build
 # --- Çalışma aşaması: yalnızca üretim bağımlılıkları + derleme çıktıları ---
 FROM node:24-bookworm-slim AS runtime
 ENV NODE_ENV=production \
-    PORT=3001 \
+    PORT=8090 \
     DATA_DIR=/data
 WORKDIR /app
 
@@ -29,8 +29,8 @@ COPY --from=builder /app/dist-server ./dist-server
 RUN mkdir -p /data && chown node:node /data
 USER node
 
-EXPOSE 3001
+EXPOSE 8090
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3001)+'/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8090)+'/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 CMD ["node", "dist-server/index.js"]

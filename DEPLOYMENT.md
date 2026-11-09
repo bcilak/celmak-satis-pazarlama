@@ -48,10 +48,10 @@ sabitlenir; env dosyasında asıl doldurmanız gerekenler **alan adı** satırla
 docker compose up -d --build
 docker compose ps              # durum: healthy olmalı
 docker compose logs -f         # canlı log
-curl -s http://127.0.0.1:3001/api/health   # {"status":"ok","database":"sqlite"}
+curl -s http://127.0.0.1:8090/api/health   # {"status":"ok","database":"sqlite"}
 ```
 
-Uygulama yalnızca `127.0.0.1:3001`'e yayınlanır (dışarıya kapalı) — dış erişim
+Uygulama yalnızca `127.0.0.1:8090`'e yayınlanır (dışarıya kapalı) — dış erişim
 sonraki adımdaki Nginx üzerinden olur.
 
 ### 4. Güncelleme
