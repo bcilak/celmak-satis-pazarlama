@@ -215,3 +215,12 @@
 .import-skipped{margin:0;padding-left:18px;font-size:12px;color:#54615c;max-height:220px;overflow:auto}
 @media (max-width:900px){.import-mapping{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .page-head .mini-btn{white-space:nowrap}
+.danger-btn{color:#a33e37;border-color:#efc3bf}
+.danger-btn:hover{background:#fdeceb}
+.delete-confirm{display:flex;gap:14px;align-items:flex-start;padding:16px 20px;margin-bottom:16px;border-color:#efc3bf;background:#fffafa}
+.delete-confirm>svg{width:22px;height:22px;color:#c0392b;flex:0 0 22px;margin-top:2px}
+.delete-confirm>div:first-of-type{flex:1}
+.delete-confirm p{margin:4px 0 0;font-size:12px;color:#5d4a48;line-height:1.5}
+.delete-confirm .error-box{margin:10px 0 0}
+.delete-final{border:0;border-radius:8px;padding:8px 12px;font-weight:700;cursor:pointer}
+@media (max-width:700px){.delete-confirm{flex-wrap:wrap}}

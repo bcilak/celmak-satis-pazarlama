@@ -30,12 +30,14 @@ import {
   LayoutDashboard,
   Menu,
   PackageCheck,
+  Pencil,
   Plus,
   Printer,
   ScrollText,
   Search,
   ShieldCheck,
   ShoppingCart,
+  Trash2,
   Users,
   X,
 } from "lucide-react";
@@ -295,6 +297,7 @@ function App() {
             <Route path="/musteriler" element={guard("CUSTOMERS",<Customers />)} />
             <Route path="/musteriler/yeni" element={guard("CUSTOMERS",<NewCustomer />)} />
             <Route path="/musteriler/ice-aktar" element={guard("CUSTOMERS",<CustomerImport />)} />
+            <Route path="/musteriler/:id/duzenle" element={guard("CUSTOMERS",<NewCustomer key="edit" />)} />
             <Route path="/musteriler/:id" element={guard("CUSTOMERS",<CustomerDetail user={session.currentUser} />)} />
             <Route
               path="/satislar"
@@ -626,18 +629,43 @@ function Customers() {
   );
 }
 
+/** Yeni cari açma; URL'de :id varsa aynı form mevcut cariyi düzenler. */
 function NewCustomer() {
   const navigate = useNavigate();
+  const { id: editId } = useParams();
   const [source, setSource] = useState("AUTO");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [tags,setTags]=useState(["CUSTOMER"]);
+  const [initial, setInitial] = useState<(Customer & { taxNumber?: string | null }) | null>(null);
+  useEffect(() => {
+    if (!editId) return;
+    api<{ customer: Customer & { taxNumber?: string | null } }>(`/customers/${editId}`)
+      .then(({ customer }) => {
+        setInitial(customer);
+        setTags((customer.tags || "CUSTOMER").split(","));
+      })
+      .catch((e) => setError(e.message));
+  }, [editId]);
   const submit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setBusy(true);
     setError("");
     const values = Object.fromEntries(new FormData(e.currentTarget));
     try {
+      if (editId) {
+        await api(`/customers/${editId}`, {
+          method: "PUT",
+          body: JSON.stringify({
+            ...values,
+            paymentTermDays: Number(values.paymentTermDays),
+            riskLimit: Number(values.riskLimit),
+            tags,
+          }),
+        });
+        navigate(`/musteriler/${editId}`);
+        return;
+      }
       await api("/customers", {
         method: "POST",
         body: JSON.stringify({
@@ -655,11 +683,14 @@ function NewCustomer() {
       setBusy(false);
     }
   };
+  if (editId && !initial) return error ? <div className="error-box">{error}</div> : <div className="loading">Cari bilgileri hazırlanıyor…</div>;
+  const v = initial;
+  const termOptions = Array.from(new Set([0, 15, 30, 45, 60, 90, v?.paymentTermDays ?? 30])).sort((a, b) => a - b);
   return (
     <form onSubmit={submit}>
       <PageHead
-        eyebrow="YENİ CARİ KART"
-        title="Yeni cari"
+        eyebrow={v ? `${v.code} · CARİ KARTI` : "YENİ CARİ KART"}
+        title={v ? "Cariyi düzenle" : "Yeni cari"}
         description="Bir cari aynı anda perakende, bayi ve tedarikçi olarak işaretlenebilir."
       />
       <ScreenGuide title="Firma hesabını üç bölümde oluşturun." steps={["Firma ve iletişim bilgilerini yazın.","Firmanın perakende, bayi veya tedarikçi rollerini seçin.","Cari kodu, varsayılan vade ve risk limitini belirleyip kaydedin."]} note="Aynı firma hem müşteriniz hem tedarikçinizse iki türü birlikte işaretleyebilirsiniz."/>
@@ -670,36 +701,41 @@ function NewCustomer() {
           <div className="form-grid">
             <label className="field wide">
               <span>Firma / unvan *</span>
-              <input required name="name" placeholder="Firma adını yazın" />
+              <input required name="name" placeholder="Firma adını yazın" defaultValue={v?.name} />
             </label>
             <label className="field">
               <span>Vergi numarası</span>
-              <input name="taxNumber" maxLength={11} />
+              <input name="taxNumber" maxLength={11} defaultValue={v?.taxNumber || ""} />
             </label>
             <label className="field">
               <span>İl</span>
-              <input name="city" />
+              <input name="city" defaultValue={v?.city || ""} />
             </label>
             <label className="field">
               <span>İlçe</span>
-              <input name="district" />
+              <input name="district" defaultValue={v?.district || ""} />
             </label>
             <label className="field wide">
               <span>Adres</span>
-              <input name="address" maxLength={300} placeholder="Mahalle, cadde, no — sevkiyat adresi olarak da kullanılır" />
+              <input name="address" maxLength={300} placeholder="Mahalle, cadde, no — sevkiyat adresi olarak da kullanılır" defaultValue={v?.address || ""} />
             </label>
             <label className="field">
               <span>Telefon</span>
-              <input name="phone" />
+              <input name="phone" defaultValue={v?.phone || ""} />
             </label>
             <label className="field">
               <span>E-posta</span>
-              <input name="email" type="email" />
+              <input name="email" type="email" defaultValue={v?.email || ""} />
             </label>
           </div>
         </div>
         <div className="form-block"><h2>Cari türleri</h2><p className="info-note">Aynı firmaya birden fazla rol verebilirsiniz.</p><div className="tag-picker">{["CUSTOMER","DEALER","SUPPLIER"].map(value=>[value,customerTagLabels[value]]).map(([value,label])=><label key={value} className={tags.includes(value)?"selected":""}><input type="checkbox" checked={tags.includes(value)} onChange={e=>setTags(e.target.checked?[...tags,value]:tags.length>1?tags.filter(x=>x!==value):tags)}/><span>{label}</span></label>)}</div></div>
-        <div className="form-block">
+        {v ? (
+          <div className="form-block">
+            <h2>Cari kodu</h2>
+            <p className="info-note"><b>{v.code}</b> — cari kodu siparişlere, cari hareketlerine ve entegrasyonlara bağlı olduğu için değiştirilemez.</p>
+          </div>
+        ) : <div className="form-block">
           <h2>Cari kodu</h2>
           <div className="choice-grid code-source">
             {[
@@ -750,24 +786,19 @@ function NewCustomer() {
               değişmeyen iç kimlik saklanır.
             </p>
           )}
-        </div>
+        </div>}
         <div className="form-block">
           <h2>Ticari koşullar</h2>
           <div className="form-grid">
             <label className="field">
               <span>Varsayılan vade</span>
-              <select name="paymentTermDays" defaultValue="30">
-                <option value="0">Peşin</option>
-                <option value="15">15 gün</option>
-                <option value="30">30 gün</option>
-                <option value="45">45 gün</option>
-                <option value="60">60 gün</option>
-                <option value="90">90 gün</option>
+              <select name="paymentTermDays" defaultValue={String(v?.paymentTermDays ?? 30)}>
+                {termOptions.map((days) => <option key={days} value={days}>{days ? `${days} gün` : "Peşin"}</option>)}
               </select>
             </label>
             <label className="field">
               <span>Risk limiti</span>
-              <input name="riskLimit" type="number" min="0" defaultValue="0" />
+              <input name="riskLimit" type="number" min="0" step="0.01" defaultValue={String(v?.riskLimit ?? 0)} />
             </label>
           </div>
         </div>
@@ -775,19 +806,19 @@ function NewCustomer() {
           <h2>Cari notu</h2>
           <label className="field">
             <span>Not (cari listesinde ve cari detayında görünür)</span>
-            <textarea name="note" maxLength={1000} rows={3} placeholder="Örn. Ödemeleri ayın 15'inde yapar, sevkiyatı depodan teslim alır…" />
+            <textarea name="note" maxLength={1000} rows={3} placeholder="Örn. Ödemeleri ayın 15'inde yapar, sevkiyatı depodan teslim alır…" defaultValue={v?.note || ""} />
           </label>
         </div>
         <div className="form-footer">
           <button
             type="button"
             className="reject-btn"
-            onClick={() => navigate("/musteriler")}
+            onClick={() => navigate(v ? `/musteriler/${v.id}` : "/musteriler")}
           >
             Vazgeç
           </button>
           <button className="primary-btn" disabled={busy}>
-            {busy ? "Kaydediliyor…" : "Cariyi oluştur"}
+            {busy ? "Kaydediliyor…" : v ? "Değişiklikleri kaydet" : "Cariyi oluştur"}
             <ChevronRight />
           </button>
         </div>
@@ -849,6 +880,22 @@ function CustomerDetail({user}:{user:User}) {
   const [openShipment,setOpenShipment]=useState<number|null>(null);
   const [shipmentDetail,setShipmentDetail]=useState<{shipment:{deliveryAddress:string;vehiclePlate?:string;driverName?:string;dispatchNumber?:string;recipientName?:string;actualDate?:string;note?:string};items:{code:string;name:string;unit:string;quantity:number}[]}|null>(null);
   const showShipment=async(shipmentId:number)=>{if(openShipment===shipmentId){setOpenShipment(null);return}setOpenShipment(shipmentId);setShipmentDetail(await api(`/shipments/${shipmentId}`));};
+  const navigate = useNavigate();
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
+  const [deleting, setDeleting] = useState(false);
+  const deleteCustomer = async () => {
+    setDeleting(true);
+    setDeleteError("");
+    try {
+      await api(`/customers/${id}`, { method: "DELETE" });
+      navigate("/musteriler");
+    } catch (e) {
+      setDeleteError((e as Error).message);
+    } finally {
+      setDeleting(false);
+    }
+  };
   useEffect(() => {
     Promise.all([api<Detail>(`/customers/${id}`),api<Ledger>(`/customers/${id}/ledger`)]).then(([detail,account])=>{setData(detail);setLedger(account)});
   }, [id]);
@@ -869,6 +916,18 @@ function CustomerDetail({user}:{user:User}) {
         description={`${[c.address, c.district, c.city].filter(Boolean).join(", ") || "Adres belirtilmedi"} · ${c.phone || "Telefon belirtilmedi"}`}
         action={
           <div className="head-actions">
+            {["ADMIN", "SALES", "ACCOUNTING"].includes(user.role) && (
+              <NavLink className="mini-btn" to={`/musteriler/${c.id}/duzenle`}>
+                <Pencil />
+                Düzenle
+              </NavLink>
+            )}
+            {user.role === "ADMIN" && (
+              <button type="button" className="mini-btn danger-btn" onClick={() => { setConfirmDelete(true); setDeleteError(""); }}>
+                <Trash2 />
+                Sil
+              </button>
+            )}
             <NavLink className="mini-btn" to="/kiymetli-evrak">
               Kıymetli evrak
             </NavLink>
@@ -879,6 +938,20 @@ function CustomerDetail({user}:{user:User}) {
           </div>
         }
       />
+      {confirmDelete && (
+        <section className="panel delete-confirm" role="alertdialog" aria-label="Cari silme onayı">
+          <Trash2 />
+          <div>
+            <b>{c.name} silinsin mi?</b>
+            <p>Cari, listelerden ve yeni işlem seçimlerinden kalkar. Geçmiş siparişleri, cari hareketleri ve raporlardaki kayıtları korunur; bu işlem İşlem Geçmişi'ne yazılır. Açık bakiyesi veya süren işi olan cari silinemez.</p>
+            {deleteError && <div className="error-box">{deleteError}</div>}
+          </div>
+          <div className="head-actions">
+            <button type="button" className="mini-btn" disabled={deleting} onClick={() => setConfirmDelete(false)}>Vazgeç</button>
+            <button type="button" className="reject-btn delete-final" disabled={deleting} onClick={deleteCustomer}>{deleting ? "Siliniyor…" : "Evet, sil"}</button>
+          </div>
+        </section>
+      )}
       <ScreenGuide title="Bu carinin bütün hareketlerini tek yerde görün." steps={["Üstte güncel borç ve gecikmiş ödemeyi kontrol edin.","Sekmelerden sipariş, vade veya sevkiyat geçmişini açın.","Yeni işlem için sağ üstteki sipariş veya kıymetli evrak düğmesini kullanın."]}/>
       <section className="customer-finance-hero">
         <div className={`debt-answer ${c.balance>0?"has-debt":"clear"}`}>
@@ -3698,6 +3771,11 @@ function actionLabel(v: string) {
         APPROVAL_REJECTED: "Sipariş reddedildi",
         APPROVAL_REVISION_REQUESTED: "Düzeltme istendi",
         ACCESS_DENIED: "Yetkisiz erişim engellendi",
+        CUSTOMER_CREATED: "Cari açıldı",
+        CUSTOMER_UPDATED: "Cari güncellendi",
+        CUSTOMER_DELETED: "Cari silindi",
+        CUSTOMER_NOTE_UPDATED: "Cari notu güncellendi",
+        SALE_RETURN_CREATED: "Sipariş iadesi alındı",
       } as Record<string, string>
     )[v] || v
   );

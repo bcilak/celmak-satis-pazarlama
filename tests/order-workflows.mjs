@@ -101,6 +101,25 @@ try {
  assert.equal(miray.district,'SİNANPAŞA');assert.equal(miray.address,'ÖĞRETMEN MAH. CUMHURİYET CAD. NO:14');assert.equal(miray.tags,'DEALER');assert.match(miray.code,/^MUS-\d{6}$/);
  await request(sales,'/customers/import','POST',{tags:['DEALER'],rows:[{name:'Uzun Telefon',phone:'1'.repeat(40)}]},400);
 
+ // Cari güncelleme: bilgiler ve türler değişir, cari kodu sabit kalır.
+ await request(sales,`/customers/${miray.id}`,'PUT',{name:'MİRAY TARIM LTD.',city:'AFYON',district:'SİNANPAŞA',address:'Yeni adres no:1',phone:'0542 000 00 00',paymentTermDays:45,riskLimit:250000,tags:['DEALER','CUSTOMER'],note:'Güncellendi'});
+ const mirayAfter=(await request(sales,`/customers/${miray.id}`)).customer;
+ assert.equal(mirayAfter.name,'MİRAY TARIM LTD.');assert.equal(mirayAfter.address,'Yeni adres no:1');assert.equal(mirayAfter.paymentTermDays,45);assert.equal(mirayAfter.riskLimit,250000);
+ assert.equal(mirayAfter.code,miray.code);assert.deepEqual(mirayAfter.tags.split(',').sort(),['CUSTOMER','DEALER']);
+ await request(sales,`/customers/${miray.id}`,'PUT',{name:'X',tags:['DEALER']},400);
+
+ // Cari silme: yalnızca yönetici; açık bakiyeli cari silinemez; temiz cari listeden kalkar.
+ await request(sales,`/customers/${miray.id}`,'DELETE',undefined,403);
+ const blocked=await request(admin,`/customers/${customerId}`,'DELETE',undefined,409);
+ assert.match(blocked.message,/bakiyesi var/);
+ await request(admin,`/customers/${miray.id}`,'DELETE');
+ assert.ok(!(await request(sales,'/customers')).some(c=>c.id===miray.id));
+ await request(sales,`/customers/${miray.id}`,'GET',undefined,404);
+ await request(admin,`/customers/${miray.id}`,'DELETE',undefined,404);
+ // Silinen adla yeniden içe aktarma yapılabilir (yeni cari kodu alır).
+ const reimported=await request(sales,'/customers/import','POST',{tags:['DEALER'],rows:[{name:'MİRAY TARIM LTD.'}]},201);
+ assert.equal(reimported.created.length,1);assert.notEqual(reimported.created[0].code,miray.code);
+
  const checksCustomer=await request(sales,'/customers','POST',{name:'Çek Bağlantı Test Cari',riskLimit:5000000},201);
  const checksBalance=async()=> (await request(admin,`/customers/${checksCustomer.id}/ledger`)).customer.balance;
  const checks=[500000,500000,1000000,1000000].map((amount,i)=>({amount,issuer:'Test Keşideci',bankName:'Test Bankası',serialNumber:`BAG-${i}`,issueDate:'2026-10-01',dueDate:`2027-0${i+1}-15`}));
@@ -127,7 +146,7 @@ try {
  assert.equal(history[0].checks[0].status,'COLLECTED');assert.equal(history[0].checks[1].status,'BOUNCED');
  console.log('PASS: eşit olmayan 4 çek, hedef/toplam farkı, grup kaydı, mükerrer/tekrar istek koruması, atomik geri alma, tahsilat ve karşılıksız çek bakiyesi');
  console.log('PASS: parça siparişi, düzenleme, revizyon, onay, 2 milyon avans, makine/parça mahsup, kısmi avans, mükerrer ve yetersiz bakiye kontrolleri');
- console.log('PASS: KDV dahil fiyat, 0/10/20 KDV kısıtı, kredi kartı tahsilatı, iade (sevk/yetki/miktar kontrolleri), makine raporu, cari notu, Excel ile toplu cari');
+ console.log('PASS: KDV dahil fiyat, 0/10/20 KDV kısıtı, kredi kartı tahsilatı, iade (sevk/yetki/miktar kontrolleri), makine raporu, cari notu, Excel ile toplu cari, cari düzenleme ve silme');
 } finally {
  server.kill();await new Promise(r=>server.once('exit',r));
  assert.equal(dirname(resolve(dataDir)),resolve(tmpdir()));

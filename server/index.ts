@@ -919,6 +919,51 @@ app.get("/api/customers/:id", (req, res) => {
   res.json({ customer, stats, sales, schedules, instruments, shipments });
 });
 
+// Cari kartı güncelleme. Cari kodu ve kod kaynağı değişmez (siparişlere/entegrasyonlara bağlı).
+const customerUpdateSchema = customerSchema.omit({ code: true, codeSource: true, externalSystem: true, externalId: true });
+app.put("/api/customers/:id", allow("ADMIN", "SALES", "ACCOUNTING"), (req, res) => {
+  const parsed = customerUpdateSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ message: "Cari bilgileri eksik veya geçersiz." });
+  const id = Number(req.params.id);
+  const previous = db.prepare(`SELECT name,tax_number taxNumber,phone,email,city,district,address,payment_term_days paymentTermDays,risk_limit riskLimit,note,
+    (SELECT GROUP_CONCAT(tag) FROM customer_tags ct WHERE ct.customer_id=customers.id) tags FROM customers WHERE id=? AND active=1`).get(id);
+  if (!previous) return res.status(404).json({ message: "Cari bulunamadı." });
+  const input = parsed.data;
+  transaction(() => {
+    db.prepare(`UPDATE customers SET name=?,tax_number=?,phone=?,email=?,city=?,district=?,address=?,payment_term_days=?,risk_limit=?,note=? WHERE id=?`)
+      .run(input.name, input.taxNumber || null, input.phone || null, input.email || null, input.city || null, input.district || null, input.address || null, input.paymentTermDays, input.riskLimit, input.note || null, id);
+    db.prepare("DELETE FROM customer_tags WHERE customer_id=?").run(id);
+    const addTag = db.prepare("INSERT INTO customer_tags (customer_id,tag) VALUES (?,?)");
+    for (const tag of new Set(input.tags)) addTag.run(id, tag);
+    audit(req.user.id, "CUSTOMER_UPDATED", "customer", id, previous, input, req.ip, req.correlationId);
+  });
+  res.json({ message: "Cari bilgileri güncellendi." });
+});
+
+// Cari silme: kayıt pasife alınır (listelerden kalkar), geçmiş siparişler, cari hareketleri ve
+// raporlar korunur. Açık bakiye veya sürmekte olan iş varsa silinmez; neden kullanıcıya söylenir.
+app.delete("/api/customers/:id", allow("ADMIN"), (req, res) => {
+  const id = Number(req.params.id);
+  const customer = db.prepare("SELECT id,code,name,balance FROM customers WHERE id=? AND active=1").get(id) as { id: number; code: string; name: string; balance: number } | undefined;
+  if (!customer) return res.status(404).json({ message: "Cari bulunamadı." });
+  const open = db.prepare(`SELECT
+    (SELECT COUNT(*) FROM sales WHERE customer_id=? AND status IN ('DRAFT','PENDING_APPROVAL','REVISION_REQUESTED')) openOrders,
+    (SELECT COUNT(*) FROM sale_items si JOIN sales s ON s.id=si.sale_id WHERE s.customer_id=? AND s.status IN ('APPROVED','COMPLETED')
+      AND si.quantity > COALESCE((SELECT SUM(shi.quantity) FROM shipment_items shi JOIN shipments sh ON sh.id=shi.shipment_id WHERE shi.sale_item_id=si.id AND sh.status<>'CANCELLED'),0)) unshippedLines,
+    (SELECT COUNT(*) FROM negotiable_instruments WHERE customer_id=? AND status NOT IN ('COLLECTED','CANCELLED','ENDORSED','ASSIGNED','RETURNED')) openInstruments,
+    (SELECT COUNT(*) FROM shipments WHERE customer_id=? AND status NOT IN ('DELIVERED','CANCELLED')) openShipments`).get(id, id, id, id) as { openOrders: number; unshippedLines: number; openInstruments: number; openShipments: number };
+  const reasons: string[] = [];
+  if (Math.abs(customer.balance) >= 0.01) reasons.push(`${Math.abs(customer.balance).toLocaleString("tr-TR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} TL ${customer.balance > 0 ? "alacak" : "borç / avans"} bakiyesi var`);
+  if (open.openOrders) reasons.push(`${open.openOrders} taslak veya onay bekleyen sipariş var`);
+  if (open.unshippedLines) reasons.push("onaylı siparişte sevk edilmemiş ürün var");
+  if (open.openInstruments) reasons.push(`${open.openInstruments} açık çek / senet var`);
+  if (open.openShipments) reasons.push(`${open.openShipments} tamamlanmamış sevkiyat var`);
+  if (reasons.length) return res.status(409).json({ message: `${customer.name} silinemez: ${reasons.join("; ")}. Önce bunları kapatın.`, reasons });
+  db.prepare("UPDATE customers SET active=0 WHERE id=?").run(id);
+  audit(req.user.id, "CUSTOMER_DELETED", "customer", id, { code: customer.code, name: customer.name, active: 1 }, { active: 0 }, req.ip, req.correlationId);
+  res.json({ message: `${customer.name} carisi silindi. Geçmiş sipariş ve hareketleri raporlarda korunur.` });
+});
+
 app.put("/api/customers/:id/note", allow("ADMIN", "SALES", "ACCOUNTING"), (req, res) => {
   const parsed = z.object({ note: z.string().trim().max(1000) }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ message: "Not en fazla 1000 karakter olabilir." });
