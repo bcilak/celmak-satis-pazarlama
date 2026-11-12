@@ -450,6 +450,37 @@ export function migrate() {
   addColumn('users', 'two_factor_enabled', 'INTEGER NOT NULL DEFAULT 0')
   addColumn('users', 'password_changed_at', 'TEXT')
   addColumn('users', 'permissions_configured', 'INTEGER NOT NULL DEFAULT 0')
+  addColumn('customers', 'note', 'TEXT')
+  addColumn('customers', 'district', 'TEXT')
+  addColumn('customers', 'address', 'TEXT')
+  addColumn('sales', 'card_installments', 'INTEGER')
+
+  // Sipariş iadeleri: sevk edilmiş ürünlerin geri alınması ve cariye alacak kaydı.
+  db.exec(`CREATE TABLE IF NOT EXISTS sale_returns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    number TEXT UNIQUE,
+    sale_id INTEGER NOT NULL REFERENCES sales(id),
+    customer_id INTEGER NOT NULL REFERENCES customers(id),
+    return_date TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    subtotal REAL NOT NULL,
+    vat_total REAL NOT NULL,
+    grand_total REAL NOT NULL,
+    currency TEXT NOT NULL,
+    exchange_rate REAL NOT NULL,
+    created_by INTEGER NOT NULL REFERENCES users(id),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`)
+  db.exec(`CREATE TABLE IF NOT EXISTS sale_return_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    return_id INTEGER NOT NULL REFERENCES sale_returns(id),
+    sale_item_id INTEGER NOT NULL REFERENCES sale_items(id),
+    product_id INTEGER NOT NULL REFERENCES products(id),
+    quantity REAL NOT NULL CHECK(quantity > 0),
+    vat_rate REAL NOT NULL,
+    line_net REAL NOT NULL,
+    line_total REAL NOT NULL
+  )`)
 }
 
 function addColumn(table: string, column: string, definition: string) {

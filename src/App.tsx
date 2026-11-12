@@ -19,6 +19,7 @@ import {
 import {
   Bell,
   Boxes,
+  ChartColumn,
   CheckCircle2,
   ChevronRight,
   CircleDollarSign,
@@ -30,6 +31,7 @@ import {
   Menu,
   PackageCheck,
   Plus,
+  Printer,
   ScrollText,
   Search,
   ShieldCheck,
@@ -39,12 +41,28 @@ import {
 } from "lucide-react";
 import { api } from "./api";
 import { CheckAdvanceForm, CheckAdvanceHistory } from "./CheckAdvances";
+import { CustomerImport } from "./CustomerImport";
+import {
+  CustomerNoteEditor,
+  MachineReport,
+  MoneyInput,
+  SalePrint,
+  SaleReturnPanel,
+  ShipmentPrint,
+  UnbackedReceivableBadge,
+  UnbackedReceivableNotice,
+  type SaleDoc,
+} from "./OrderTools";
 import {
   startAuthentication,
   startRegistration,
 } from "@simplewebauthn/browser";
 import {
+  VAT_RATES,
+  customerTagLabels,
+  isBuyer,
   money,
+  paymentMethodLabels,
   roleLabels,
   statusLabels,
   type Approval,
@@ -206,6 +224,7 @@ function App() {
     ["CUSTOMERS","/musteriler","Cariler",<Users/>],
     ["SALES","/satislar","Siparişler",<ShoppingCart/>],
     ["SALES","/yedek-parcalar","Yedek Parçalar",<Boxes/>],
+    ["SALES","/raporlar","Raporlar",<ChartColumn/>],
     ["INSTRUMENTS","/kiymetli-evrak","Çek ve Senetler",<Landmark/>],
     ["RECEIPTS","/tahsilatlar","Tahsilatlar",<CircleDollarSign/>],
     ["RECEIPTS","/avanslar","Avanslar",<CircleDollarSign/>],
@@ -228,7 +247,7 @@ function App() {
           </div>
         </div>
         <nav>
-          {menu.filter(([permission])=>can(permission)).map(([permission,to,label,icon])=><SideLink key={permission} to={to} icon={icon} label={label} close={()=>setMobileOpen(false)}/>)}
+          {menu.filter(([permission])=>can(permission)).map(([,to,label,icon])=><SideLink key={to} to={to} icon={icon} label={label} close={()=>setMobileOpen(false)}/>)}
         </nav>
         <div className="sidebar-foot">
           <ShieldCheck />
@@ -275,6 +294,7 @@ function App() {
             />
             <Route path="/musteriler" element={guard("CUSTOMERS",<Customers />)} />
             <Route path="/musteriler/yeni" element={guard("CUSTOMERS",<NewCustomer />)} />
+            <Route path="/musteriler/ice-aktar" element={guard("CUSTOMERS",<CustomerImport />)} />
             <Route path="/musteriler/:id" element={guard("CUSTOMERS",<CustomerDetail user={session.currentUser} />)} />
             <Route
               path="/satislar"
@@ -284,8 +304,10 @@ function App() {
             <Route path="/satislar/:id/duzenle" element={guard("SALES",<NewSale key="edit" />)} />
             <Route path="/yedek-parcalar" element={guard("SALES",<SpareParts user={session.currentUser} />)} />
             <Route path="/yedek-parcalar/yeni" element={guard("SALES",<NewSale key="spare" spare />)} />
-            <Route path="/onaylar/siparis/:id" element={guard("APPROVALS",<SaleDetail />)} />
-            <Route path="/satislar/:id" element={guard("SALES",<SaleDetail />)} />
+            <Route path="/onaylar/siparis/:id" element={guard("APPROVALS",<SaleDetail user={session.currentUser} />)} />
+            <Route path="/satislar/:id" element={guard("SALES",<SaleDetail user={session.currentUser} />)} />
+            <Route path="/satislar/:id/yazdir" element={guard("SALES",<SalePrint />)} />
+            <Route path="/raporlar" element={guard("SALES",<MachineReport />)} />
             <Route
               path="/onaylar"
               element={guard("APPROVALS",<Approvals user={session.currentUser} />)}
@@ -304,6 +326,7 @@ function App() {
             />
             <Route path="/avanslar" element={guard("RECEIPTS",<Receipts key="advances" user={session.currentUser} advanceOnly />)} />
             <Route path="/sevkiyatlar/yeni" element={guard("SHIPMENTS",<NewShipment />)} />
+            <Route path="/sevkiyatlar/:id/yazdir" element={guard("SHIPMENTS",<ShipmentPrint />)} />
             <Route
               path="/e-belgeler"
               element={guard("EDOCUMENTS",<EDocuments user={session.currentUser} />)}
@@ -514,11 +537,14 @@ function PanelTitle({ title, link }: { title: string; link?: string }) {
 function Customers() {
   const [items, setItems] = useState<Customer[]>([]);
   const [query, setQuery] = useState("");
+  const [unbackedOnly, setUnbackedOnly] = useState(false);
   useEffect(() => {
     api<Customer[]>("/customers").then(setItems);
   }, []);
+  const unbacked = items.filter((x) => isBuyer(x.tags) && x.balance > 0.01);
   const shown = items.filter((x) =>
-    (x.name + x.code + x.city)
+    (!unbackedOnly || (isBuyer(x.tags) && x.balance > 0.01)) &&
+    (x.name + x.code + (x.city || "") + (x.note || ""))
       .toLocaleLowerCase("tr")
       .includes(query.toLocaleLowerCase("tr")),
   );
@@ -529,10 +555,16 @@ function Customers() {
         title="Cariler"
         description="Müşteri, bayi ve tedarikçi carileri; bakiye, risk ve iletişim bilgileri."
         action={
-          <NavLink className="primary-btn" to="/musteriler/yeni">
-            <Plus />
-            Yeni cari
-          </NavLink>
+          <div className="head-actions">
+            <NavLink className="mini-btn" to="/musteriler/ice-aktar">
+              <FileText />
+              Excel'den içe aktar
+            </NavLink>
+            <NavLink className="primary-btn" to="/musteriler/yeni">
+              <Plus />
+              Yeni cari
+            </NavLink>
+          </div>
         }
       />
       <ScreenGuide title="Müşteri ve tedarikçi hesaplarını buradan bulun." steps={["Arama alanına firma adı veya cari kodu yazın.","Kartta bakiye ve risk durumunu kontrol edin.","Sipariş, ödeme ve sevkiyat geçmişi için Cari detayını açın."]}/>
@@ -546,6 +578,12 @@ function Customers() {
               placeholder="Cari ara…"
             />
           </label>
+          {unbacked.length > 0 && (
+            <button type="button" className={unbackedOnly ? "unbacked-filter active" : "unbacked-filter"} onClick={() => setUnbackedOnly(!unbackedOnly)} title="Çek/senet ya da ödeme ile karşılanmamış cari borcu olanlar">
+              <span className="unbacked-badge" aria-hidden="true">!</span>
+              {unbackedOnly ? "Tüm carileri göster" : `${unbacked.length} caride evraksız alacak`}
+            </button>
+          )}
           <span>{shown.length} cari</span>
         </div>
         <div className="customer-grid">
@@ -556,24 +594,25 @@ function Customers() {
                   {c.name.slice(0, 2).toUpperCase()}
                 </span>
                 <span
-                  className={c.balance > c.riskLimit ? "risk danger" : "risk"}
+                  className={isBuyer(c.tags) && c.riskLimit > 0 && c.balance > c.riskLimit ? "risk danger" : "risk"}
                 >
-                  {(c.tags||"").split(",").includes("CUSTOMER")?(c.balance > c.riskLimit ? "Limit aşıldı" : "Risk normal"):"Tedarikçi hesabı"}
+                  {isBuyer(c.tags)?(c.riskLimit > 0 && c.balance > c.riskLimit ? "Limit aşıldı" : "Risk normal"):"Tedarikçi hesabı"}
                 </span>
               </div>
-              <h3>{c.name}</h3>
-              <div className="account-tags">{(c.tags||"CUSTOMER").split(",").map(tag=><span key={tag}>{({CUSTOMER:"Müşteri",SUPPLIER:"Tedarikçi",DEALER:"Bayi"} as Record<string,string>)[tag]||tag}</span>)}</div>
+              <h3>{c.name}{isBuyer(c.tags) && <UnbackedReceivableBadge balance={c.balance} />}</h3>
+              <div className="account-tags">{(c.tags||"CUSTOMER").split(",").map(tag=><span key={tag}>{customerTagLabels[tag]||tag}</span>)}</div>
               <p>
-                {c.code} · {c.city}
+                {c.code}{c.city ? ` · ${[c.city, c.district].filter(Boolean).join(" / ")}` : ""}
               </p>
+              {c.note && <p className="customer-card-note" title={c.note}><b>Not:</b> {c.note}</p>}
               <div className="customer-finance">
                 <div>
                   <small>{c.balance>0?"Bizim alacağımız":c.balance<0?"Bizim borcumuz":"Bakiye kapalı"}</small>
                   <strong>{money(Math.abs(c.balance))}</strong>
                 </div>
                 <div>
-                  <small>{(c.tags||"").split(",").includes("CUSTOMER")?"Risk limiti":"Hesap türü"}</small>
-                  <strong>{(c.tags||"").split(",").includes("CUSTOMER")?money(c.riskLimit):"Tedarikçi"}</strong>
+                  <small>{isBuyer(c.tags)?"Risk limiti":"Hesap türü"}</small>
+                  <strong>{isBuyer(c.tags)?money(c.riskLimit):"Tedarikçi"}</strong>
                 </div>
               </div>
               <NavLink className="text-btn" to={`/musteriler/${c.id}`}>
@@ -621,9 +660,9 @@ function NewCustomer() {
       <PageHead
         eyebrow="YENİ CARİ KART"
         title="Yeni cari"
-        description="Bir cari aynı anda müşteri, bayi ve tedarikçi olarak işaretlenebilir."
+        description="Bir cari aynı anda perakende, bayi ve tedarikçi olarak işaretlenebilir."
       />
-      <ScreenGuide title="Firma hesabını üç bölümde oluşturun." steps={["Firma ve iletişim bilgilerini yazın.","Firmanın müşteri, bayi veya tedarikçi rollerini seçin.","Cari kodu, varsayılan vade ve risk limitini belirleyip kaydedin."]} note="Aynı firma hem müşteriniz hem tedarikçinizse iki türü birlikte işaretleyebilirsiniz."/>
+      <ScreenGuide title="Firma hesabını üç bölümde oluşturun." steps={["Firma ve iletişim bilgilerini yazın.","Firmanın perakende, bayi veya tedarikçi rollerini seçin.","Cari kodu, varsayılan vade ve risk limitini belirleyip kaydedin."]} note="Aynı firma hem müşteriniz hem tedarikçinizse iki türü birlikte işaretleyebilirsiniz."/>
       {error && <div className="error-box">{error}</div>}
       <section className="panel customer-form">
         <div className="form-block">
@@ -638,8 +677,16 @@ function NewCustomer() {
               <input name="taxNumber" maxLength={11} />
             </label>
             <label className="field">
-              <span>Şehir</span>
+              <span>İl</span>
               <input name="city" />
+            </label>
+            <label className="field">
+              <span>İlçe</span>
+              <input name="district" />
+            </label>
+            <label className="field wide">
+              <span>Adres</span>
+              <input name="address" maxLength={300} placeholder="Mahalle, cadde, no — sevkiyat adresi olarak da kullanılır" />
             </label>
             <label className="field">
               <span>Telefon</span>
@@ -651,7 +698,7 @@ function NewCustomer() {
             </label>
           </div>
         </div>
-        <div className="form-block"><h2>Cari türleri</h2><p className="info-note">Aynı firmaya birden fazla rol verebilirsiniz.</p><div className="tag-picker">{[["CUSTOMER","Müşteri"],["DEALER","Bayi"],["SUPPLIER","Tedarikçi"]].map(([value,label])=><label key={value} className={tags.includes(value)?"selected":""}><input type="checkbox" checked={tags.includes(value)} onChange={e=>setTags(e.target.checked?[...tags,value]:tags.length>1?tags.filter(x=>x!==value):tags)}/><span>{label}</span></label>)}</div></div>
+        <div className="form-block"><h2>Cari türleri</h2><p className="info-note">Aynı firmaya birden fazla rol verebilirsiniz.</p><div className="tag-picker">{["CUSTOMER","DEALER","SUPPLIER"].map(value=>[value,customerTagLabels[value]]).map(([value,label])=><label key={value} className={tags.includes(value)?"selected":""}><input type="checkbox" checked={tags.includes(value)} onChange={e=>setTags(e.target.checked?[...tags,value]:tags.length>1?tags.filter(x=>x!==value):tags)}/><span>{label}</span></label>)}</div></div>
         <div className="form-block">
           <h2>Cari kodu</h2>
           <div className="choice-grid code-source">
@@ -723,6 +770,13 @@ function NewCustomer() {
               <input name="riskLimit" type="number" min="0" defaultValue="0" />
             </label>
           </div>
+        </div>
+        <div className="form-block">
+          <h2>Cari notu</h2>
+          <label className="field">
+            <span>Not (cari listesinde ve cari detayında görünür)</span>
+            <textarea name="note" maxLength={1000} rows={3} placeholder="Örn. Ödemeleri ayın 15'inde yapar, sevkiyatı depodan teslim alır…" />
+          </label>
         </div>
         <div className="form-footer">
           <button
@@ -812,7 +866,7 @@ function CustomerDetail({user}:{user:User}) {
       <PageHead
         eyebrow={`${c.code} · ${c.codeSource === "EXTERNAL" ? c.externalSystem || "ERP" : "ÇELMAK"}`}
         title={c.name}
-        description={`${c.city || "Şehir belirtilmedi"} · ${c.phone || "Telefon belirtilmedi"}`}
+        description={`${[c.address, c.district, c.city].filter(Boolean).join(", ") || "Adres belirtilmedi"} · ${c.phone || "Telefon belirtilmedi"}`}
         action={
           <div className="head-actions">
             <NavLink className="mini-btn" to="/kiymetli-evrak">
@@ -839,6 +893,13 @@ function CustomerDetail({user}:{user:User}) {
           <div><small>Açık ödeme planı</small><b>{money(openTry)}</b><span>{openSchedules.length} ödeme / çek / senet</span></div>
         </div>
       </section>
+      {isBuyer(c.tags) && <UnbackedReceivableNotice balance={c.balance} />}
+      <CustomerNoteEditor
+        customerId={c.id}
+        note={c.note}
+        canEdit={["ADMIN", "SALES", "ACCOUNTING"].includes(user.role)}
+        onSaved={(note) => setData({ ...data, customer: { ...data.customer, note } })}
+      />
       <section className="panel advance-panel">
         <div><span className="eyebrow">BAĞLANTI AVANSI</span><h2>Avans ve siparişten düşme</h2><p>Önceden alınan ödeme cariye işlenir. Mevcut borçlardan sonra kalan tutarı makine veya yedek parça siparişinde kullanabilirsiniz.</p></div>
         <div className="advance-balance"><span>Kullanılabilir cari avansı</span><strong>{money(Math.max(0,-c.balance))}</strong><small>Net cari alacak bakiyesi · TL</small></div>
@@ -1074,6 +1135,7 @@ function SaleTable({
             <th>Tutar</th>
             <th>Oluşturan</th>
             <th>Durum</th>
+            <th>Belge</th>
             {action && <th />}
           </tr>
         </thead>
@@ -1096,6 +1158,9 @@ function SaleTable({
                 <td>
                   <Status value={s.status} />
                 </td>
+                <td>
+                  <NavLink className="mini-btn doc-link" to={`/satislar/${s.id}/yazdir`} title="Sipariş formunu yazdır veya PDF olarak kaydet"><Printer />PDF</NavLink>
+                </td>
                 {action && (
                   <td>
                     {["DRAFT", "REVISION_REQUESTED"].includes(s.status) && (
@@ -1109,7 +1174,7 @@ function SaleTable({
             ))
           ) : (
             <tr>
-              <td colSpan={6}>
+              <td colSpan={7}>
                 <EmptyInline text="Henüz sipariş kaydı yok." />
               </td>
             </tr>
@@ -1120,10 +1185,18 @@ function SaleTable({
   );
 }
 
-function SaleDetail(){
-  type Detail={sale:{id:number;number:string;status:string;paymentMethod:string;subtotal:number;vatTotal:number;grandTotal:number;downPayment:number;advanceAmount:number;note?:string;currency:string;exchangeRate:number;createdAt:string;customerId:number;customerCode:string;customerName:string;createdBy:string;approvalAssignee?:string};items:{id:number;code:string;name:string;unit:string;quantity:number;unitPrice:number;vatRate:number;lineTotal:number}[];schedule:{sequenceNo:number;paymentType:string;dueDate:string;amount:number;paidAmount:number;currency:string;status:string}[];shipments:{id:number;number:string;status:string;plannedDate:string;actualDate?:string;dispatchNumber?:string}[]};
-  const{id}=useParams();const[data,setData]=useState<Detail|null>(null);useEffect(()=>{api<Detail>(`/sales/${id}/detail`).then(setData)},[id]);if(!data)return <div className="loading">Sipariş detayı hazırlanıyor…</div>;const s=data.sale;
-  return <><PageHead eyebrow={`${s.customerCode} · ${s.number}`} title={s.customerName} description={`${formatDate(s.createdAt)} tarihinde ${s.createdBy} tarafından oluşturuldu.`}/><div className="sale-detail-grid"><section className="panel"><PanelTitle title="Satılan ürünler"/><div className="table-wrap"><table><thead><tr><th>Ürün</th><th>Miktar</th><th>Birim fiyat</th><th>KDV</th><th>Satır toplamı</th></tr></thead><tbody>{data.items.map(x=><tr key={x.id}><td><b>{x.name}</b><small>{x.code}</small></td><td>{x.quantity} {x.unit}</td><td>{money(x.unitPrice,s.currency)}</td><td>%{x.vatRate}</td><td className="amount">{money(x.lineTotal,s.currency)}</td></tr>)}</tbody></table></div></section><aside className="panel sale-financial-summary"><PanelTitle title="Finansal özet"/><p><span>Ara toplam</span><b>{money(s.subtotal,s.currency)}</b></p><p><span>KDV</span><b>{money(s.vatTotal,s.currency)}</b></p><p className="grand"><span>Genel toplam</span><b>{money(s.grandTotal,s.currency)}</b></p><p><span>Yeni peşinat</span><b>{money(s.downPayment,s.currency)}</b></p><p><span>Cari avansından mahsup</span><b>{money(s.advanceAmount,s.currency)}</b></p><p><span>Sipariş notu</span><b>{s.note||"—"}</b></p><p><span>Ödeme şekli</span><b>{paymentTypeLabel(s.paymentMethod)}</b></p><p><span>Onay yetkilisi</span><b>{s.approvalAssignee||"Belirlenmedi"}</b></p><Status value={s.status}/></aside></div><section className="panel sale-schedule"><PanelTitle title="Ödeme ve vade planı"/><div className="compact-list">{data.schedule.map(x=><div key={x.sequenceNo}><span><b>{x.sequenceNo}. ödeme · {paymentTypeLabel(x.paymentType)}</b><small>{dateOnly(x.dueDate)}</small></span><strong>{money(x.amount,x.currency)}<small>{x.paidAmount?`${money(x.paidAmount,x.currency)} ödendi`:"Ödeme bekleniyor"}</small></strong><Status value={x.status}/></div>)}</div></section></>;
+function SaleDetail({user}:{user:User}){
+  const{id}=useParams();const[data,setData]=useState<SaleDoc|null>(null);const[message,setMessage]=useState("");
+  const load=useCallback(()=>api<SaleDoc>(`/sales/${id}/detail`).then(setData),[id]);
+  useEffect(()=>{load()},[load]);
+  if(!data)return <div className="loading">Sipariş detayı hazırlanıyor…</div>;const s=data.sale;
+  const method=`${paymentTypeLabel(s.paymentMethod)}${s.paymentMethod==="CREDIT_CARD"&&s.cardInstallments&&s.cardInstallments>1?` · ${s.cardInstallments} taksit`:""}`;
+  return <><PageHead eyebrow={`${s.customerCode} · ${s.number}`} title={s.customerName} description={`${formatDate(s.createdAt)} tarihinde ${s.createdBy} tarafından oluşturuldu.`} action={<NavLink className="primary-btn" to={`/satislar/${s.id}/yazdir`}><Printer/>Sipariş PDF</NavLink>}/>
+    {message&&<Toast text={message} close={()=>setMessage("")}/>}
+    <div className="sale-detail-grid"><section className="panel"><PanelTitle title="Satılan ürünler"/><div className="table-wrap"><table><thead><tr><th>Ürün</th><th>Miktar</th><th>Birim fiyat (KDV dahil)</th><th>KDV</th><th>Satır toplamı</th></tr></thead><tbody>{data.items.map(x=><tr key={x.id}><td><b>{x.name}</b><small>{[x.model,x.code].filter(Boolean).join(" · ")}</small></td><td>{x.quantity} {x.unit}{x.shippedQuantity>0&&<small>{x.shippedQuantity} sevk edildi{x.returnedQuantity>0?` · ${x.returnedQuantity} iade`:""}</small>}</td><td>{money(x.lineTotal/x.quantity,s.currency)}</td><td>%{x.vatRate}</td><td className="amount">{money(x.lineTotal,s.currency)}</td></tr>)}</tbody></table></div></section><aside className="panel sale-financial-summary"><PanelTitle title="Finansal özet"/><p><span>Ara toplam (KDV hariç)</span><b>{money(s.subtotal,s.currency)}</b></p><p><span>KDV</span><b>{money(s.vatTotal,s.currency)}</b></p><p className="grand"><span>Genel toplam</span><b>{money(s.grandTotal,s.currency)}</b></p><p><span>Yeni peşinat</span><b>{money(s.downPayment,s.currency)}</b></p><p><span>Cari avansından mahsup</span><b>{money(s.advanceAmount,s.currency)}</b></p>{data.returns.length>0&&<p><span>İade edilen</span><b>− {money(data.returns.reduce((sum,r)=>sum+r.grandTotal,0),s.currency)}</b></p>}<p><span>Sipariş notu</span><b>{s.note||"—"}</b></p><p><span>Ödeme şekli</span><b>{method}</b></p><p><span>Onay yetkilisi</span><b>{s.approvalAssignee||"Belirlenmedi"}</b></p><Status value={s.status}/></aside></div>
+    <section className="panel sale-schedule"><PanelTitle title="Ödeme ve vade planı"/>{data.schedule.length?<div className="compact-list">{data.schedule.map(x=><div key={x.sequenceNo}><span><b>{x.sequenceNo===0?"Peşinat":`${x.sequenceNo}. ödeme`} · {paymentTypeLabel(x.paymentType)}</b><small>{dateOnly(x.dueDate)}</small></span><strong>{money(x.amount,x.currency)}<small>{x.paidAmount?`${money(x.paidAmount,x.currency)} ödendi`:"Ödeme bekleniyor"}</small></strong><Status value={x.status}/></div>)}</div>:<p className="info-note pad">{s.paymentMethod==="CREDIT_CARD"?"Kredi kartıyla tahsil edilir; vade planı oluşmaz.":s.paymentMethod==="CASH"?"Peşin tahsil edilir; vade planı oluşmaz.":"Vade planı yok."}</p>}</section>
+    <SaleReturnPanel data={data} canReturn={user.role==="ADMIN"} onDone={(text)=>{setMessage(text);load();}}/>
+  </>;
 }
 
 function CatalogPager({page,total,pageSize,onChange}:{page:number;total:number;pageSize:number;onChange:(page:number)=>void}) {
@@ -1191,6 +1264,7 @@ function NewSale({spare=false}:{spare?:boolean}) {
     { productId: number; quantity: number; unitPrice: number; vatRate: number }[]
   >([]);
   const [payment, setPayment] = useState("TERM");
+  const [cardInstallments, setCardInstallments] = useState(1);
   const [down, setDown] = useState(0);
   const [currency, setCurrency] = useState("TRY");
   const [exchangeRate, setExchangeRate] = useState(1);
@@ -1213,9 +1287,11 @@ function NewSale({spare=false}:{spare?:boolean}) {
       setProducts(p);
       setConfig(conf);
       setAssignees(approvers);setApprovalAssigneeId(approvers[0]?.id||0);
-      if(editId) return api<{sale:{customerId:number;status:string;paymentMethod:string;downPayment:number;advanceAmount:number;currency:string;exchangeRate:number;approvalAssigneeId:number;instrumentType:string;orderKind:string;note:string};items:{productId:number;quantity:number;unitPrice:number;vatRate:number}[];schedule:{sequenceNo:number;dueDate:string;amount:number}[]}>(`/sales/${editId}/detail`).then(d=>{
+      if(editId) return api<{sale:{customerId:number;status:string;paymentMethod:string;cardInstallments?:number|null;downPayment:number;advanceAmount:number;currency:string;exchangeRate:number;approvalAssigneeId:number;instrumentType:string;orderKind:string;note:string};items:{productId:number;quantity:number;unitPrice:number;vatRate:number;lineTotal:number}[];schedule:{sequenceNo:number;dueDate:string;amount:number}[]}>(`/sales/${editId}/detail`).then(d=>{
         if(!["DRAFT","REVISION_REQUESTED"].includes(d.sale.status)) throw new Error("Bu sipariş düzenlenemez.");
-        setCustomerId(d.sale.customerId);setPayment(d.sale.paymentMethod);setDown(d.sale.downPayment);setAdvanceAmount(d.sale.advanceAmount);setCurrency(d.sale.currency);setExchangeRate(d.sale.exchangeRate);setApprovalAssigneeId(d.sale.approvalAssigneeId||approvers[0]?.id||0);setInstrumentType(d.sale.instrumentType||"CHECK");setOrderKind(d.sale.orderKind);setNote(d.sale.note||"");setLines(d.items.map(({productId,quantity,unitPrice,vatRate})=>({productId,quantity,unitPrice,vatRate})));
+        setCustomerId(d.sale.customerId);setPayment(d.sale.paymentMethod);setCardInstallments(d.sale.cardInstallments||1);setDown(d.sale.downPayment);setAdvanceAmount(d.sale.advanceAmount);setCurrency(d.sale.currency);setExchangeRate(d.sale.exchangeRate);setApprovalAssigneeId(d.sale.approvalAssigneeId||approvers[0]?.id||0);setInstrumentType(d.sale.instrumentType||"CHECK");setOrderKind(d.sale.orderKind);setNote(d.sale.note||"");
+        // Formda fiyat KDV dahil gösterilir: satır toplamı / miktar.
+        setLines(d.items.map(({productId,quantity,vatRate,lineTotal})=>({productId,quantity,unitPrice:Number((lineTotal/quantity).toFixed(2)),vatRate:normalizeVat(vatRate)})));
         const plan=d.schedule.filter(x=>x.sequenceNo>0).map(({dueDate,amount})=>({dueDate,amount}));setPaymentSchedule(plan.length?plan:[{dueDate:addDaysToToday(30),amount:0}]);setInstrumentCount(plan.length||1);setTermInstallmentCount(plan.length||1);
       });
     }).catch(e=>setError(e.message));
@@ -1243,12 +1319,13 @@ function NewSale({spare=false}:{spare?:boolean}) {
     .filter((x) => x.product);
   const convertedPrice = (product: Product) =>
     currency === "TRY" ? product.unitPrice : product.unitPrice / exchangeRate;
-  const subtotal = detail.reduce((s, l) => s + l.unitPrice * l.quantity, 0);
-  const total = detail.reduce(
-    (s, l) =>
-      s + Number((Number((l.unitPrice * l.quantity).toFixed(2)) * (1 + l.vatRate / 100)).toFixed(2)),
-    0,
-  );
+  // Katalog fiyatı KDV hariçtir; formda KDV dahil fiyat kullanılır.
+  const grossCatalogPrice = (product: Product) =>
+    Number((convertedPrice(product) * (1 + normalizeVat(product.vatRate) / 100)).toFixed(2));
+  // Girilen birim fiyat KDV DAHİLDİR: toplam = fiyat × miktar, KDV bu tutarın içinden ayrılır.
+  const lineGross = (l: { unitPrice: number; quantity: number }) => Number((l.unitPrice * l.quantity).toFixed(2));
+  const total = Number(detail.reduce((s, l) => s + lineGross(l), 0).toFixed(2));
+  const subtotal = Number(detail.reduce((s, l) => s + Number((lineGross(l) / (1 + l.vatRate / 100)).toFixed(2)), 0).toFixed(2));
   const availableAdvance = Math.max(0, -(customer?.balance || 0));
   const maxAdvance = exchangeRate > 0 ? Math.max(0, Math.min(Number((total-down).toFixed(2)), Math.floor(availableAdvance/exchangeRate*100)/100)) : 0;
   const remainingPayment = Number((total-down-advanceAmount).toFixed(2));
@@ -1261,11 +1338,11 @@ function NewSale({spare=false}:{spare?:boolean}) {
   };
   const addProduct = (id: number) => {
     const selectedProduct = products.find((p) => p.id === id)!;
+    const initialPrice = selectedProduct.manualPrice ? 0 : grossCatalogPrice(selectedProduct);
     if (!lines.length) {
-      const initialPrice = selectedProduct.manualPrice ? 0 : convertedPrice(selectedProduct);
       setPaymentSchedule((current) => [{
         ...current[0],
-        amount: Number((initialPrice * (1 + selectedProduct.vatRate / 100)).toFixed(2)),
+        amount: initialPrice,
       }]);
     }
     setLines((v) => {
@@ -1279,8 +1356,8 @@ function NewSale({spare=false}:{spare?:boolean}) {
             {
               productId: id,
               quantity: 1,
-              unitPrice: selectedProduct.manualPrice ? 0 : Number(convertedPrice(selectedProduct).toFixed(4)),
-              vatRate: selectedProduct.vatRate,
+              unitPrice: initialPrice,
+              vatRate: normalizeVat(selectedProduct.vatRate),
             },
           ];
     });
@@ -1321,6 +1398,7 @@ function NewSale({spare=false}:{spare?:boolean}) {
           orderKind,
           advanceAmount,
           paymentMethod: fullyFromAdvance ? "TERM" : payment,
+          cardInstallments: !fullyFromAdvance && payment === "CREDIT_CARD" ? cardInstallments : undefined,
           paymentTermDays: customer?.paymentTermDays || 30,
           downPayment: down,
           currency,
@@ -1407,6 +1485,8 @@ function NewSale({spare=false}:{spare?:boolean}) {
                   </div>
                 </div>
               )}
+              {customer && <UnbackedReceivableNotice balance={customer.balance} />}
+              {customer?.note && <p className="customer-card-note order-customer-note"><b>Cari notu:</b> {customer.note}</p>}
             </div>
           </section>
           <section className="panel form-section">
@@ -1416,7 +1496,7 @@ function NewSale({spare=false}:{spare?:boolean}) {
               <div className="choice-grid" role="group" aria-label="Sipariş türü">
                 {([["MACHINE","Ana mamul"],["SPARE_PART","Yedek parça"]] as const).map(([kind,label])=><label key={kind} className={orderKind===kind?"selected":""}><input type="radio" name="orderKind" value={kind} checked={orderKind===kind} disabled={lines.length>0&&orderKind!==kind} onChange={()=>{setOrderKind(kind);setProductSearch("");setProductGroup("");setProductSubgroup("");setProductPage(1);setAdvanceAmount(0);setDown(0);setPaymentSchedule([{dueDate:addDaysToToday(30),amount:0}]);setInstrumentCount(1);setTermInstallmentCount(1);}}/><span>{label}</span><CheckCircle2/></label>)}
               </div>
-              <p>{orderKind==="MACHINE"?"Önce ürün ailesini, ardından satılacak modeli seçin. Ana mamul fiyatı siparişte elle girilir ve KDV otomatik %10 hesaplanır.":"Yedek parçalar: standart parça, hazır parça, yarı mamul ve diğer parçalar."}{lines.length>0&&" Sipariş türünü değiştirmek için önce eklenen ürünleri kaldırın."}</p>
+              <p>{orderKind==="MACHINE"?"Önce ürün ailesini, ardından satılacak modeli seçin. Ana mamul fiyatı siparişte elle girilir.":"Yedek parçalar: standart parça, hazır parça, yarı mamul ve diğer parçalar."} <b>Fiyatı KDV dahil yazın</b>; KDV (%0, %10 veya %20) tutarın içinden ayrılır, üzerine eklenmez.{lines.length>0&&" Sipariş türünü değiştirmek için önce eklenen ürünleri kaldırın."}</p>
               {orderKind==="MACHINE"&&<><div className="machine-groups" role="group" aria-label="Ürün ailesi">{machineGroups.map(group=><button type="button" className={activeProductGroup===group&&!normalizedProductSearch?"active":""} onClick={()=>{setProductGroup(group);setProductSubgroup("");setProductSearch("");setProductPage(1);}} key={group}>{group}<small>{products.filter(p=>p.partCategory==="MACHINE"&&p.productGroup===group).length} model</small></button>)}</div>{machineSubgroups.length>0&&<div className="machine-subgroups" role="group" aria-label={`${activeProductGroup} alt grupları`}><b>Römork alt grubu</b><div>{machineSubgroups.map(subgroup=><button type="button" className={activeProductSubgroup===subgroup&&!normalizedProductSearch?"active":""} onClick={()=>{setProductSubgroup(subgroup);setProductSearch("");setProductPage(1);}} key={subgroup}>{subgroup}<small>{products.filter(p=>p.productSubgroup===subgroup).length} model</small></button>)}</div></div>}</>}
               <label className="field catalog-search"><span>{orderKind==="MACHINE"?"Model ara":"Ürün / parça ara"}</span><input value={productSearch} onChange={e=>{setProductSearch(e.target.value);setProductPage(1);}} placeholder={orderKind==="MACHINE"?"Model adı veya katalog modeli…":"Kod, parça veya ürün adı…"}/></label>
               <div className="product-picker">
@@ -1433,7 +1513,7 @@ function NewSale({spare=false}:{spare?:boolean}) {
                       </small>
                     </span>
                     <strong>
-                      {p.manualPrice?"Fiyatı siparişte gir":money(convertedPrice(p), currency)}
+                      {p.manualPrice?"Fiyatı siparişte gir":<>{money(grossCatalogPrice(p), currency)}<small>KDV dahil</small></>}
                       <Plus />
                     </strong>
                   </button>
@@ -1492,19 +1572,17 @@ function NewSale({spare=false}:{spare?:boolean}) {
                         </button>
                       </label>
                       <label className="field line-field">
-                        <span>Birim fiyat ({currency})</span>
-                        <input
-                          type="number"
+                        <span>Birim fiyat · KDV dahil</span>
+                        <MoneyInput
                           required
-                          min="0.01"
-                          step="0.01"
-                          value={l.unitPrice||""}
+                          currency={currency}
                           placeholder="Fiyat girin"
-                          onChange={(e) =>
+                          value={l.unitPrice}
+                          onChange={(value) =>
                             setLines((v) =>
                               v.map((x) =>
                                 x.productId === l.productId
-                                  ? { ...x, unitPrice: Number(e.target.value) }
+                                  ? { ...x, unitPrice: value }
                                   : x,
                               ),
                             )
@@ -1512,15 +1590,10 @@ function NewSale({spare=false}:{spare?:boolean}) {
                         />
                       </label>
                       <label className="field line-field vat-field">
-                        <span>KDV oranı (%)</span>
-                        <input
-                          type="number"
+                        <span>KDV oranı</span>
+                        <select
                           required
-                          min="0"
-                          max="100"
-                          step="0.01"
                           value={l.vatRate}
-                          readOnly={l.product.partCategory==="MACHINE"}
                           onChange={(e) =>
                             setLines((v) =>
                               v.map((x) =>
@@ -1530,13 +1603,13 @@ function NewSale({spare=false}:{spare?:boolean}) {
                               ),
                             )
                           }
-                        />
+                        >
+                          {VAT_RATES.map((rate) => <option key={rate} value={rate}>%{rate}</option>)}
+                        </select>
                       </label>
                       <strong>
-                        {money(
-                          l.unitPrice * l.quantity * (1 + l.vatRate / 100),
-                          currency,
-                        )}
+                        {money(lineGross(l), currency)}
+                        <small>içinde KDV {money(lineGross(l) - lineGross(l) / (1 + l.vatRate / 100), currency)}</small>
                       </strong>
                       <button
                         type="button"
@@ -1586,7 +1659,7 @@ function NewSale({spare=false}:{spare?:boolean}) {
               </div>
               <section className="order-advance-box">
                 <div className="order-advance-heading"><div><h3>Avans hesabından düş</h3><p>Nakit, havale veya teslim alınmış çeklerden oluşan net cari alacak kullanılabilir.</p></div><strong>{money(availableAdvance)}<small>Kullanılabilir avans · TL</small></strong></div>
-                <label className="field"><span>Siparişte kullanılacak avans ({currency})</span><input type="number" min="0" step="0.01" max={maxAdvance} value={advanceAmount} onChange={e=>changeAdvance(Number(e.target.value))}/></label>
+                <label className="field"><span>Siparişte kullanılacak avans</span><MoneyInput currency={currency} value={advanceAmount} invalid={invalidAdvance} onChange={changeAdvance}/></label>
                 <div className="head-actions"><button type="button" className="mini-btn" disabled={!customerId||maxAdvance<=0} onClick={()=>changeAdvance(maxAdvance)}>Kullanılabilecek en yüksek tutarı uygula</button><button type="button" className="mini-btn" disabled={!advanceAmount} onClick={()=>changeAdvance(0)}>Avans kullanma</button></div>
                 {invalidAdvance&&<div className="error-box" role="alert">Bu siparişte en fazla {money(maxAdvance,currency)} avans kullanabilirsiniz.</div>}
                 <div className="order-advance-totals"><div><span>Avanstan düşülecek</span><b>{money(advanceAmount,currency)}</b>{currency!=="TRY"&&<small>{money(advanceAmount*exchangeRate)} karşılığı</small>}</div><div><span>Onay sonrası kalan avans (tahmini)</span><b>{money(Math.max(0,availableAdvance-advanceAmount*exchangeRate))}</b></div><div><span>Sipariş için kalan ödeme</span><b>{money(Math.max(0,remainingPayment),currency)}</b></div></div>
@@ -1601,6 +1674,7 @@ function NewSale({spare=false}:{spare?:boolean}) {
                   ["TERM", `${customer?.paymentTermDays || 30} gün vadeli`],
                   ["CHECK", "Yeni çek / senet"],
                   ["MIXED", "Peşinat + evrak"],
+                  ["CREDIT_CARD", "Kredi kartı"],
                 ].map(([v, l]) => (
                   <label className={payment === v ? "selected" : ""} key={v}>
                     <input
@@ -1638,15 +1712,25 @@ function NewSale({spare=false}:{spare?:boolean}) {
                   />
                 </>
               )}
+              {payment === "CREDIT_CARD" && (
+                <div className="instrument-plan card-plan">
+                  <label className="field">
+                    <span>Kart taksit sayısı</span>
+                    <select value={cardInstallments} onChange={(e) => setCardInstallments(Number(e.target.value))}>
+                      {Array.from({ length: 12 }, (_, i) => i + 1).map((n) => <option key={n} value={n}>{n === 1 ? "Tek çekim" : `${n} taksit`}</option>)}
+                    </select>
+                  </label>
+                  <p className="info-note">Kalan {money(Math.max(0, total - down - advanceAmount), currency)} kredi kartıyla tahsil edilir ve sipariş onaylandığında cariye işlenir. Taksitlendirme banka (POS) tarafındadır; carinin vadesi oluşmaz.</p>
+                </div>
+              )}
               {payment === "MIXED" && (
                 <><label className="field compact">
                   <span>Peşinat tutarı</span>
-                  <input
-                    type="number"
-                    min="0"
-                    max={total}
-                      value={down}
-                    onChange={(e) => setDown(Number(e.target.value))}
+                  <MoneyInput
+                    currency={currency}
+                    value={down}
+                    invalid={down > total}
+                    onChange={setDown}
                   />
                 </label>{down>total&&<div className="error-box inline-warning">Peşinat genel toplamdan büyük olamaz. En fazla {money(total,currency)} girebilirsiniz.</div>}</>
               )}
@@ -1692,11 +1776,11 @@ function NewSale({spare=false}:{spare?:boolean}) {
           <span className="eyebrow">SİPARİŞ ÖZETİ</span>
           <h3>{customer?.name || "Müşteri seçilmedi"}</h3>
           <div>
-            <span>Ara toplam</span>
+            <span>Ara toplam (KDV hariç)</span>
             <b>{money(subtotal, currency)}</b>
           </div>
           <div>
-            <span>KDV</span>
+            <span>KDV (fiyatın içinde)</span>
             <b>{money(total - subtotal, currency)}</b>
           </div>
           <div className="total">
@@ -1755,12 +1839,17 @@ function EditablePaymentPlan({
           <span key={index}>
             <i>{index + 1}</i>
             <input type="date" value={row.dueDate} onChange={(e)=>setRows((current)=>current.map((x,i)=>i===index?{...x,dueDate:e.target.value}:x))}/>
-            <input type="number" min="0.01" step="0.01" value={row.amount} onChange={(e)=>setRows((current)=>current.map((x,i)=>i===index?{...x,amount:Number(e.target.value)}:x))}/>
+            <MoneyInput currency={currency} value={row.amount} onChange={(value)=>setRows((current)=>current.map((x,i)=>i===index?{...x,amount:value}:x))}/>
           </span>
       ))}
       <div className={valid?"plan-total valid":"plan-total invalid"}><span>Plan toplamı</span><b>{money(entered,currency)} / {money(total,currency)}</b></div>
     </div>
   );
+}
+
+/** Ürün kaydındaki KDV 0/10/20 dışındaysa (eski kayıt) varsayılan %20 kullanılır. */
+function normalizeVat(rate: number) {
+  return (VAT_RATES as readonly number[]).includes(rate) ? rate : 20;
 }
 
 function addDaysToToday(days: number) {
@@ -2344,6 +2433,9 @@ function Shipments({ user }: { user: User }) {
                   {!item.dispatchNumber&&<small>Sevke çıkışta numara girilecek</small>}
                 </span>
               </div>
+              <div className="shipment-doc-link">
+                <NavLink className="mini-btn doc-link" to={`/sevkiyatlar/${item.id}/yazdir`}><Printer />Sevk formu (PDF)</NavLink>
+              </div>
               {["ADMIN", "SHIPPING"].includes(user.role) &&
                 !["DELIVERED", "CANCELLED"].includes(item.status) && (
                   <div className="shipment-actions">
@@ -2452,6 +2544,8 @@ function NewShipment() {
       customerId: number;
       customerName: string;
       city: string;
+      district?: string | null;
+      address?: string | null;
     };
     items: {
       saleItemId: number;
@@ -2620,7 +2714,7 @@ function NewShipment() {
                       <input
                         required
                         name="deliveryAddress"
-                        defaultValue={detail.sale.city}
+                        defaultValue={[detail.sale.address, detail.sale.district, detail.sale.city].filter(Boolean).join(", ")}
                       />
                     </label>
                     <label className="field">
@@ -3634,18 +3728,9 @@ function documentTypeLabel(v: string) {
   );
 }
 function paymentTypeLabel(v: string) {
-  return (
-    (
-      {
-        CASH: "Peşin",
-        BANK_TRANSFER: "Havale/EFT",
-        CHECK: "Çek",
-        PROMISSORY_NOTE: "Senet",
-      } as Record<string, string>
-    )[v] || v
-  );
+  return ({ ...paymentMethodLabels, CHECK: "Çek" } as Record<string, string>)[v] || v;
 }
-function transactionTypeLabel(v:string){return ({CASH_RECEIPT:"Nakit",BANK_RECEIPT:"Havale / EFT",INSTRUMENT_RECEIPT:"Çek / senet tahsilatı",INSTRUMENT_RECEIVED:"Çek / senet teslim alındı",INSTRUMENT_BOUNCED:"Karşılıksız evrak — borç yeniden açıldı",DOWN_PAYMENT:"Peşinat",RECEIPT_REVERSAL:"Ters kayıt"} as Record<string,string>)[v]||"Tahsilat"}
+function transactionTypeLabel(v:string){return ({CARD_RECEIPT:"Kredi kartı",SALE_RETURN:"İade",CASH_RECEIPT:"Nakit",BANK_RECEIPT:"Havale / EFT",INSTRUMENT_RECEIPT:"Çek / senet tahsilatı",INSTRUMENT_RECEIVED:"Çek / senet teslim alındı",INSTRUMENT_BOUNCED:"Karşılıksız evrak — borç yeniden açıldı",DOWN_PAYMENT:"Peşinat",RECEIPT_REVERSAL:"Ters kayıt"} as Record<string,string>)[v]||"Tahsilat"}
 function dateOnly(value: string) {
   return new Intl.DateTimeFormat("tr-TR", { dateStyle: "medium" }).format(
     new Date(`${value}T12:00:00`),

@@ -24,8 +24,11 @@ try {
  const part=await request(sales,'/products/parts','POST',{code:'TEST-PART',name:'Standart Test Parçası',partCategory:'STANDARD',unit:'Adet',unitPrice:100000,vatRate:20,stockQuantity:100},201);
  const products=await request(sales,'/products');assert.equal(products.find(x=>x.id===part.id).partCategory,'STANDARD');
  const assignees=await request(sales,'/approval-assignees');const manager=assignees.find(x=>x.email==='mehmet@celmak.com');
- const payload={customerId,orderKind:'SPARE_PART',advanceAmount:120000,paymentMethod:'TERM',paymentTermDays:30,downPayment:0,currency:'TRY',exchangeRate:1,approvalAssigneeId:manager.id,note:'Parça siparişi',items:[{productId:part.id,quantity:1,unitPrice:100000,vatRate:20}]};
+ // Fiyatlar KDV DAHİL gönderilir: 120.000 (KDV %20 dahil) → 100.000 + 20.000 KDV.
+ const payload={customerId,orderKind:'SPARE_PART',advanceAmount:120000,paymentMethod:'TERM',paymentTermDays:30,downPayment:0,currency:'TRY',exchangeRate:1,approvalAssigneeId:manager.id,note:'Parça siparişi',items:[{productId:part.id,quantity:1,unitPrice:120000,vatRate:20}]};
  const sale=await request(sales,'/sales','POST',payload,201);
+ assert.equal(sale.grandTotal,120000,'KDV fiyatın üzerine eklenmemeli');assert.equal(sale.subtotal,100000);assert.equal(sale.vatTotal,20000);
+ await request(sales,'/sales','POST',{...payload,items:[{...payload.items[0],vatRate:18}]},400);
  await request(sales,`/sales/${sale.id}`,'PUT',{...payload,note:'Düzenlenen sipariş'});
  let detail=await request(admin,`/sales/${sale.id}/detail`);assert.equal(detail.sale.note,'Düzenlenen sipariş');assert.equal(detail.items.length,1);assert.equal(detail.schedule.length,0);
  await request(sales,`/sales/${sale.id}/submit`,'POST');
@@ -40,7 +43,7 @@ try {
  await request(admin,`/approvals/${approval.id}/decision`,'POST',{decision:'APPROVED'},409);
  await request(sales,`/sales/${sale.id}`,'PUT',payload,409);
  const machine=products.find(x=>x.partCategory==='MACHINE');
- const mixed={...payload,orderKind:'MACHINE',advanceAmount:80000,paymentMethod:'CASH',downPayment:20000,items:[{productId:machine.id,quantity:1,unitPrice:100000,vatRate:20}]};
+ const mixed={...payload,orderKind:'MACHINE',advanceAmount:80000,paymentMethod:'CASH',downPayment:20000,items:[{productId:machine.id,quantity:1,unitPrice:110000,vatRate:10}]};
  const second=await request(sales,'/sales','POST',mixed,201);
  await request(sales,`/sales/${second.id}/submit`,'POST');approval=await approvalFor(second.id);
  await request(admin,`/approvals/${approval.id}/decision`,'POST',{decision:'APPROVED'});
@@ -57,6 +60,46 @@ try {
  approval=await approvalFor(a.id);await request(admin,`/approvals/${approval.id}/decision`,'POST',{decision:'APPROVED'});
  approval=await approvalFor(b.id);await request(admin,`/approvals/${approval.id}/decision`,'POST',{decision:'APPROVED'},409);
  assert.equal(await balance(),-600000);
+
+ // Kredi kartı: onayda borç ve kart tahsilatı birlikte işlenir, bakiye değişmez; vade planı oluşmaz.
+ const card=await request(sales,'/sales','POST',{...mixed,advanceAmount:0,downPayment:0,paymentMethod:'CREDIT_CARD',cardInstallments:3},201);
+ await request(sales,`/sales/${card.id}/submit`,'POST');approval=await approvalFor(card.id);
+ await request(admin,`/approvals/${approval.id}/decision`,'POST',{decision:'APPROVED'});
+ assert.equal(await balance(),-600000,'Kart tahsilatı satış borcunu kapatmalı');
+ detail=await request(admin,`/sales/${card.id}/detail`);assert.equal(detail.sale.paymentMethod,'CREDIT_CARD');assert.equal(detail.sale.cardInstallments,3);assert.equal(detail.schedule.length,0);
+ assert.ok((await request(admin,`/customers/${customerId}/ledger`)).transactions.some(t=>t.transactionType==='CARD_RECEIPT'&&t.credit===110000));
+
+ // İade: sevk edilmeden iade alınamaz; sevk edilen miktar kadar iade cariye alacak işler.
+ const cardItem=detail.items[0];
+ await request(admin,`/sales/${card.id}/returns`,'POST',{returnDate:'2026-11-10',reason:'Sevk yokken iade',items:[{saleItemId:cardItem.id,quantity:1}]},400);
+ await request(admin,'/shipments','POST',{saleId:card.id,plannedDate:'2026-11-09',deliveryAddress:'Test depo adresi',items:[{saleItemId:cardItem.id,quantity:1}]},201);
+ await request(sales,`/sales/${card.id}/returns`,'POST',{returnDate:'2026-11-10',reason:'Yetkisiz iade',items:[{saleItemId:cardItem.id,quantity:1}]},403);
+ const saleReturn=await request(admin,`/sales/${card.id}/returns`,'POST',{returnDate:'2026-11-10',reason:'Hasarlı teslim',items:[{saleItemId:cardItem.id,quantity:1}]},201);
+ assert.equal(saleReturn.grandTotal,110000);assert.equal(await balance(),-710000,'İade tutarı cariye alacak olarak işlenmeli');
+ await request(admin,`/sales/${card.id}/returns`,'POST',{returnDate:'2026-11-10',reason:'İkinci iade',items:[{saleItemId:cardItem.id,quantity:1}]},400);
+ detail=await request(admin,`/sales/${card.id}/detail`);assert.equal(detail.returns.length,1);assert.equal(detail.items[0].returnedQuantity,1);
+
+ // Makine raporu: iade edilen adet net toplamdan düşer.
+ const report=await request(sales,'/reports/machine-orders?from=2020-01-01&to=2099-12-31');
+ const machineRow=report.rows.find(r=>r.customerId===customerId&&r.productId===machine.id);
+ assert.equal(machineRow.quantity,2);assert.equal(machineRow.returnedQuantity,1);assert.equal(machineRow.shippedQuantity,1);
+
+ // Cari notu: oluştururken ve sonradan düzenlenebilir, listede görünür.
+ const noted=await request(sales,'/customers','POST',{name:'Notlu Bayi',tags:['DEALER'],note:'Ayın 15inde öder'},201);
+ await request(sales,`/customers/${noted.id}/note`,'PUT',{note:'Depodan teslim alır'});
+ assert.equal((await request(sales,'/customers')).find(c=>c.id===noted.id).note,'Depodan teslim alır');
+
+ // Excel'den toplu cari: kayıtlı ad ve dosyadaki tekrar atlanır, adres/ilçe saklanır, tür Bayi olur.
+ const imported=await request(sales,'/customers/import','POST',{tags:['DEALER'],paymentTermDays:30,rows:[
+  {name:'MİRAY TARIM',city:'AFYON',district:'SİNANPAŞA',address:'ÖĞRETMEN MAH. CUMHURİYET CAD. NO:14',phone:'0542 338 26 30'},
+  {name:'miray  tarım',city:'AFYON'},
+  {name:'Notlu Bayi'},
+  {name:'BALIKESİR PANCAR'},
+ ]},201);
+ assert.equal(imported.created.length,2);assert.deepEqual(imported.skipped.map(s=>s.reason),['Dosyada tekrar ediyor','Bu adla cari zaten kayıtlı']);
+ const miray=(await request(sales,'/customers')).find(c=>c.name==='MİRAY TARIM');
+ assert.equal(miray.district,'SİNANPAŞA');assert.equal(miray.address,'ÖĞRETMEN MAH. CUMHURİYET CAD. NO:14');assert.equal(miray.tags,'DEALER');assert.match(miray.code,/^MUS-\d{6}$/);
+ await request(sales,'/customers/import','POST',{tags:['DEALER'],rows:[{name:'Uzun Telefon',phone:'1'.repeat(40)}]},400);
 
  const checksCustomer=await request(sales,'/customers','POST',{name:'Çek Bağlantı Test Cari',riskLimit:5000000},201);
  const checksBalance=async()=> (await request(admin,`/customers/${checksCustomer.id}/ledger`)).customer.balance;
@@ -84,6 +127,7 @@ try {
  assert.equal(history[0].checks[0].status,'COLLECTED');assert.equal(history[0].checks[1].status,'BOUNCED');
  console.log('PASS: eşit olmayan 4 çek, hedef/toplam farkı, grup kaydı, mükerrer/tekrar istek koruması, atomik geri alma, tahsilat ve karşılıksız çek bakiyesi');
  console.log('PASS: parça siparişi, düzenleme, revizyon, onay, 2 milyon avans, makine/parça mahsup, kısmi avans, mükerrer ve yetersiz bakiye kontrolleri');
+ console.log('PASS: KDV dahil fiyat, 0/10/20 KDV kısıtı, kredi kartı tahsilatı, iade (sevk/yetki/miktar kontrolleri), makine raporu, cari notu, Excel ile toplu cari');
 } finally {
  server.kill();await new Promise(r=>server.once('exit',r));
  assert.equal(dirname(resolve(dataDir)),resolve(tmpdir()));

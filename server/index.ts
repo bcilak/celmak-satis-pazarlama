@@ -681,7 +681,7 @@ const moduleForPath=(path:string):PermissionKey|undefined=>{
   if(path==="/dashboard")return "DASHBOARD";
   if(path.includes("/reconciliations")||path.endsWith("/ledger")||path.startsWith("/receipts")||path.startsWith("/exchange-rates"))return "RECEIPTS";
   if(path.startsWith("/customers"))return "CUSTOMERS";
-  if(path.startsWith("/products")||path.startsWith("/sales"))return "SALES";
+  if(path.startsWith("/products")||path.startsWith("/sales")||path.startsWith("/reports"))return "SALES";
   if(path.startsWith("/instruments"))return "INSTRUMENTS";
   if(path.startsWith("/approvals"))return "APPROVALS";
   if(path.startsWith("/shipments")||path.startsWith("/shipment-plans"))return "SHIPMENTS";
@@ -721,7 +721,7 @@ app.get("/api/customers", (_req, res) => {
       .prepare(
         `SELECT id, code, name, tax_number taxNumber, phone, email, city,
     payment_term_days paymentTermDays, risk_limit riskLimit, balance, code_source codeSource,
-    external_system externalSystem, external_id externalId,
+    external_system externalSystem, external_id externalId, note, district, address,
     (SELECT GROUP_CONCAT(tag) FROM customer_tags ct WHERE ct.customer_id=customers.id) tags FROM customers WHERE active=1 ORDER BY name`,
       )
       .all(),
@@ -735,13 +735,51 @@ const customerSchema = z.object({
   phone: z.string().trim().max(30).optional(),
   email: z.string().email().optional().or(z.literal("")),
   city: z.string().trim().max(80).optional(),
+  district: z.string().trim().max(80).optional(),
+  address: z.string().trim().max(300).optional(),
   paymentTermDays: z.number().int().min(0).max(365).default(30),
   riskLimit: z.number().min(0).default(0),
   codeSource: z.enum(["AUTO", "MANUAL", "EXTERNAL"]).default("AUTO"),
   externalSystem: z.string().trim().max(40).optional(),
   externalId: z.string().trim().max(80).optional(),
   tags: z.array(z.enum(["CUSTOMER","SUPPLIER","DEALER"])).min(1).default(["CUSTOMER"]),
+  note: z.string().trim().max(1000).optional(),
 });
+type CustomerInput = z.infer<typeof customerSchema>;
+
+/** Cari kartını ve türlerini yazar; çağıran taraf transaction içinde çağırmalıdır. */
+function insertCustomer(input: CustomerInput, req: Request, source = "FORM") {
+  const temporary = `TMP-${randomUUID()}`;
+  const inserted = db
+    .prepare(
+      `INSERT INTO customers (code,name,tax_number,phone,email,city,district,address,payment_term_days,risk_limit,code_source,external_system,external_id,note)
+  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    )
+    .run(
+      input.code || temporary,
+      input.name,
+      input.taxNumber || null,
+      input.phone || null,
+      input.email || null,
+      input.city || null,
+      input.district || null,
+      input.address || null,
+      input.paymentTermDays,
+      input.riskLimit,
+      input.codeSource,
+      input.externalSystem || null,
+      input.externalId || null,
+      input.note || null,
+    );
+  const id = Number(inserted.lastInsertRowid);
+  const code = input.codeSource === "AUTO" ? `MUS-${String(id).padStart(6, "0")}` : input.code!;
+  if (input.codeSource === "AUTO") db.prepare("UPDATE customers SET code=? WHERE id=?").run(code, id);
+  const addTag = db.prepare("INSERT INTO customer_tags (customer_id,tag) VALUES (?,?)");
+  for (const tag of input.tags) addTag.run(id, tag);
+  audit(req.user.id, "CUSTOMER_CREATED", "customer", id, null, { ...input, code, source }, req.ip, req.correlationId);
+  return { id, code };
+}
+
 app.post(
   "/api/customers",
   allow("ADMIN", "SALES", "ACCOUNTING"),
@@ -770,47 +808,7 @@ app.post(
             "ERP kaynaklı müşteri için kaynak sistem ve harici kayıt numarası zorunludur.",
         });
     try {
-      const result = transaction(() => {
-        const temporary = `TMP-${randomUUID()}`;
-        const inserted = db
-          .prepare(
-            `INSERT INTO customers (code,name,tax_number,phone,email,city,payment_term_days,risk_limit,code_source,external_system,external_id)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-          )
-          .run(
-            input.code || temporary,
-            input.name,
-            input.taxNumber || null,
-            input.phone || null,
-            input.email || null,
-            input.city || null,
-            input.paymentTermDays,
-            input.riskLimit,
-            input.codeSource,
-            input.externalSystem || null,
-            input.externalId || null,
-          );
-        const id = Number(inserted.lastInsertRowid);
-        const code =
-          input.codeSource === "AUTO"
-            ? `MUS-${String(id).padStart(6, "0")}`
-            : input.code!;
-        if (input.codeSource === "AUTO")
-          db.prepare("UPDATE customers SET code=? WHERE id=?").run(code, id);
-        const addTag=db.prepare("INSERT INTO customer_tags (customer_id,tag) VALUES (?,?)");
-        for(const tag of input.tags)addTag.run(id,tag);
-        audit(
-          req.user.id,
-          "CUSTOMER_CREATED",
-          "customer",
-          id,
-          null,
-          { ...input, code },
-          req.ip,
-          req.correlationId,
-        );
-        return { id, code };
-      });
+      const result = transaction(() => insertCustomer(input, req));
       res
         .status(201)
         .json({ ...result, message: "Müşteri başarıyla oluşturuldu." });
@@ -826,12 +824,56 @@ app.post(
   },
 );
 
+// Excel / CSV'den toplu cari açma. Aynı adla kayıtlı cari ve dosyadaki tekrarlar atlanır;
+// geçerli satırlar tek işlemde (hepsi ya da hiçbiri) otomatik cari koduyla açılır.
+const customerImportSchema = z.object({
+  tags: z.array(z.enum(["CUSTOMER", "SUPPLIER", "DEALER"])).min(1),
+  paymentTermDays: z.number().int().min(0).max(365).default(30),
+  riskLimit: z.number().min(0).default(0),
+  rows: z
+    .array(customerSchema.pick({ name: true, city: true, district: true, address: true, phone: true, taxNumber: true, email: true, note: true }))
+    .min(1)
+    .max(2000),
+});
+const customerNameKey = (name: string) => name.replace(/\s+/g, " ").trim().toLocaleUpperCase("tr-TR");
+app.post("/api/customers/import", allow("ADMIN", "SALES", "ACCOUNTING"), (req, res) => {
+  const parsed = customerImportSchema.safeParse(req.body);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    const rowIndex = issue?.path[0] === "rows" && typeof issue.path[1] === "number" ? issue.path[1] + 1 : undefined;
+    const fieldNames: Record<string, string> = { name: "Firma adı", city: "İl", district: "İlçe", address: "Adres", phone: "Telefon", taxNumber: "Vergi no", email: "E-posta", note: "Not" };
+    const field = issue?.path[2] ? fieldNames[String(issue.path[2])] || String(issue.path[2]) : undefined;
+    return res.status(400).json({ message: rowIndex ? `${rowIndex}. satır${field ? ` (${field})` : ""} geçersiz veya çok uzun.` : "İçe aktarma bilgileri eksik veya geçersiz." });
+  }
+  const { tags, paymentTermDays, riskLimit, rows } = parsed.data;
+  const existing = new Set((db.prepare("SELECT name FROM customers WHERE active=1").all() as { name: string }[]).map((row) => customerNameKey(row.name)));
+  const seen = new Set<string>();
+  const created: { row: number; id: number; code: string; name: string }[] = [];
+  const skipped: { row: number; name: string; reason: string }[] = [];
+  transaction(() => {
+    rows.forEach((row, index) => {
+      const name = row.name.replace(/\s+/g, " ").trim();
+      const key = customerNameKey(name);
+      if (existing.has(key)) return skipped.push({ row: index + 1, name, reason: "Bu adla cari zaten kayıtlı" });
+      if (seen.has(key)) return skipped.push({ row: index + 1, name, reason: "Dosyada tekrar ediyor" });
+      seen.add(key);
+      const result = insertCustomer({ ...row, name, tags, paymentTermDays, riskLimit, codeSource: "AUTO" }, req, "EXCEL_IMPORT");
+      created.push({ row: index + 1, ...result, name });
+    });
+  });
+  res.status(created.length ? 201 : 200).json({
+    created,
+    skipped,
+    message: `${created.length} cari açıldı${skipped.length ? `, ${skipped.length} satır atlandı` : ""}.`,
+  });
+});
+
 app.get("/api/customers/:id", (req, res) => {
   const id = Number(req.params.id);
   const customer = db
     .prepare(
       `SELECT id,code,name,tax_number taxNumber,phone,email,city,payment_term_days paymentTermDays,
-    risk_limit riskLimit,balance,code_source codeSource,external_system externalSystem,external_id externalId,created_at createdAt,
+    risk_limit riskLimit,balance,code_source codeSource,external_system externalSystem,external_id externalId,created_at createdAt,note,district,address,
     (SELECT GROUP_CONCAT(tag) FROM customer_tags ct WHERE ct.customer_id=customers.id) tags
     FROM customers WHERE id=? AND active=1`,
     )
@@ -875,6 +917,17 @@ app.get("/api/customers/:id", (req, res) => {
     )
     .get(id, id, id, id);
   res.json({ customer, stats, sales, schedules, instruments, shipments });
+});
+
+app.put("/api/customers/:id/note", allow("ADMIN", "SALES", "ACCOUNTING"), (req, res) => {
+  const parsed = z.object({ note: z.string().trim().max(1000) }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ message: "Not en fazla 1000 karakter olabilir." });
+  const id = Number(req.params.id);
+  const previous = db.prepare("SELECT note FROM customers WHERE id=? AND active=1").get(id) as { note: string | null } | undefined;
+  if (!previous) return res.status(404).json({ message: "Cari bulunamadı." });
+  db.prepare("UPDATE customers SET note=? WHERE id=?").run(parsed.data.note || null, id);
+  audit(req.user.id, "CUSTOMER_NOTE_UPDATED", "customer", id, previous, parsed.data, req.ip, req.correlationId);
+  res.json({ message: "Cari notu kaydedildi." });
 });
 
 app.get("/api/customers/:id/ledger", (req, res) => {
@@ -1261,7 +1314,8 @@ const saleSchema = z.object({
   orderKind: z.enum(["MACHINE", "SPARE_PART"]).default("MACHINE"),
   advanceAmount: z.number().min(0).default(0),
   customerId: z.number().int().positive(),
-  paymentMethod: z.enum(["CASH", "TERM", "CHECK", "MIXED"]),
+  paymentMethod: z.enum(["CASH", "TERM", "CHECK", "MIXED", "CREDIT_CARD"]),
+  cardInstallments: z.number().int().min(1).max(12).optional(),
   paymentTermDays: z.number().int().min(0).max(365),
   downPayment: z.number().min(0),
   approvalAssigneeId: z.number().int().positive().optional(),
@@ -1278,8 +1332,9 @@ const saleSchema = z.object({
       z.object({
         productId: z.number().int().positive(),
         quantity: z.number().positive(),
+        // KDV DAHİL birim fiyat: kullanıcı faturadaki son fiyatı girer, KDV içinden ayrılır.
         unitPrice: z.number().positive(),
-        vatRate: z.number().min(0).max(100),
+        vatRate: z.number().refine((rate) => [0, 10, 20].includes(rate), "KDV oranı %0, %10 veya %20 olmalıdır."),
       }),
     )
     .min(1),
@@ -1304,12 +1359,85 @@ app.get("/api/sales", (_req, res) => {
 app.get("/api/approval-assignees", allow("SALES","ADMIN"), (req,res)=>res.json(db.prepare("SELECT id,name,email FROM users WHERE role='ADMIN' AND active=1 AND id<>? ORDER BY name").all(req.user.id)));
 
 app.get("/api/sales/:id/detail", (req,res)=>{
-  const id=Number(req.params.id);const sale=db.prepare(`SELECT s.id,s.number,s.status,s.note,s.order_kind orderKind,s.advance_amount advanceAmount,s.approval_assignee_id approvalAssigneeId,s.instrument_type instrumentType,s.payment_method paymentMethod,s.subtotal,s.vat_total vatTotal,s.grand_total grandTotal,s.down_payment downPayment,s.currency,s.exchange_rate exchangeRate,s.created_at createdAt,c.id customerId,c.code customerCode,c.name customerName,u.name createdBy,a.name approvalAssignee FROM sales s JOIN customers c ON c.id=s.customer_id JOIN users u ON u.id=s.created_by LEFT JOIN users a ON a.id=s.approval_assignee_id WHERE s.id=?`).get(id);
+  const id=Number(req.params.id);const sale=db.prepare(`SELECT s.id,s.number,s.status,s.note,s.order_kind orderKind,s.advance_amount advanceAmount,s.approval_assignee_id approvalAssigneeId,s.instrument_type instrumentType,s.payment_method paymentMethod,s.card_installments cardInstallments,s.subtotal,s.vat_total vatTotal,s.grand_total grandTotal,s.down_payment downPayment,s.currency,s.exchange_rate exchangeRate,s.created_at createdAt,s.approved_at approvedAt,c.id customerId,c.code customerCode,c.name customerName,c.tax_number customerTaxNumber,c.phone customerPhone,c.email customerEmail,c.city customerCity,u.name createdBy,a.name approvalAssignee FROM sales s JOIN customers c ON c.id=s.customer_id JOIN users u ON u.id=s.created_by LEFT JOIN users a ON a.id=s.approval_assignee_id WHERE s.id=?`).get(id);
   if(!sale)return res.status(404).json({message:"Satış bulunamadı."});
-  const items=db.prepare(`SELECT si.id,si.product_id productId,p.code,p.name,p.unit,si.quantity,si.unit_price unitPrice,si.vat_rate vatRate,si.line_total lineTotal FROM sale_items si JOIN products p ON p.id=si.product_id WHERE si.sale_id=?`).all(id);
+  const items=db.prepare(`SELECT si.id,si.product_id productId,p.code,p.name,p.unit,p.manufacturer_model model,p.product_group productGroup,si.quantity,si.unit_price unitPrice,si.vat_rate vatRate,si.line_total lineTotal,
+    (SELECT COALESCE(SUM(shi.quantity),0) FROM shipment_items shi JOIN shipments sh ON sh.id=shi.shipment_id WHERE shi.sale_item_id=si.id AND sh.status<>'CANCELLED') shippedQuantity,
+    (SELECT COALESCE(SUM(ri.quantity),0) FROM sale_return_items ri WHERE ri.sale_item_id=si.id) returnedQuantity
+    FROM sale_items si JOIN products p ON p.id=si.product_id WHERE si.sale_id=?`).all(id);
   const schedule=db.prepare(`SELECT sequence_no sequenceNo,payment_type paymentType,due_date dueDate,amount,paid_amount paidAmount,currency,status FROM payment_schedules WHERE sale_id=? ORDER BY sequence_no`).all(id);
   const shipments=db.prepare(`SELECT id,number,status,planned_date plannedDate,actual_date actualDate,dispatch_number dispatchNumber FROM shipments WHERE sale_id=? ORDER BY id DESC`).all(id);
-  res.json({sale,items,schedule,shipments});
+  const returns=(db.prepare(`SELECT r.id,r.number,r.return_date returnDate,r.reason,r.subtotal,r.vat_total vatTotal,r.grand_total grandTotal,r.currency,u.name createdBy FROM sale_returns r JOIN users u ON u.id=r.created_by WHERE r.sale_id=? ORDER BY r.id DESC`).all(id) as {id:number}[])
+    .map(r=>({...r,items:db.prepare(`SELECT ri.quantity,ri.line_total lineTotal,p.name,p.code,p.unit FROM sale_return_items ri JOIN products p ON p.id=ri.product_id WHERE ri.return_id=?`).all(r.id)}));
+  res.json({sale,items,schedule,shipments,returns});
+});
+
+const saleReturnSchema = z.object({
+  returnDate: z.string().date(),
+  reason: z.string().trim().min(3).max(500),
+  items: z.array(z.object({ saleItemId: z.number().int().positive(), quantity: z.number().positive() })).min(1),
+});
+// İade yalnızca sevk edilmiş miktar için yapılabilir; tutar cariye alacak olarak işlenir.
+// Stok hareketleri sistemde tutulmadığı için stok miktarına dokunulmaz.
+app.post("/api/sales/:id/returns", allow("ADMIN"), (req, res) => {
+  const parsed = saleReturnSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ message: "İade tarihi, nedeni ve en az bir ürün miktarı zorunludur." });
+  const saleId = Number(req.params.id);
+  const sale = db.prepare("SELECT id,number,status,customer_id customerId,currency,exchange_rate exchangeRate FROM sales WHERE id=?").get(saleId) as { id: number; number: string; status: string; customerId: number; currency: string; exchangeRate: number } | undefined;
+  if (!sale) return res.status(404).json({ message: "Sipariş bulunamadı." });
+  if (!["APPROVED", "COMPLETED"].includes(sale.status)) return res.status(409).json({ message: "Yalnızca onaylanmış siparişlerde iade alınabilir." });
+  if (new Set(parsed.data.items.map(x => x.saleItemId)).size !== parsed.data.items.length) return res.status(400).json({ message: "Aynı ürün iadede tek satırda olmalıdır." });
+  try {
+    const result = transaction(() => {
+      const lines = parsed.data.items.map(input => {
+        const item = db.prepare(`SELECT si.id,si.product_id productId,si.quantity,si.vat_rate vatRate,si.line_total lineTotal,p.name,
+          (SELECT COALESCE(SUM(shi.quantity),0) FROM shipment_items shi JOIN shipments sh ON sh.id=shi.shipment_id WHERE shi.sale_item_id=si.id AND sh.status<>'CANCELLED') shipped,
+          (SELECT COALESCE(SUM(ri.quantity),0) FROM sale_return_items ri WHERE ri.sale_item_id=si.id) returned
+          FROM sale_items si JOIN products p ON p.id=si.product_id WHERE si.id=? AND si.sale_id=?`).get(input.saleItemId, saleId) as { id: number; productId: number; quantity: number; vatRate: number; lineTotal: number; name: string; shipped: number; returned: number } | undefined;
+        if (!item) throw new Error("İade edilecek ürün bu siparişte bulunamadı.");
+        const returnable = Number((item.shipped - item.returned).toFixed(4));
+        if (input.quantity > returnable + 0.0001) throw new Error(`${item.name}: en fazla ${returnable} adet iade alınabilir (sevk edilen miktar − önceki iadeler).`);
+        const lineTotal = Number((item.lineTotal / item.quantity * input.quantity).toFixed(2));
+        const lineNet = Number((lineTotal / (1 + item.vatRate / 100)).toFixed(2));
+        return { ...item, returnQuantity: input.quantity, lineTotal, lineNet };
+      });
+      const grandTotal = Number(lines.reduce((s, x) => s + x.lineTotal, 0).toFixed(2));
+      const subtotal = Number(lines.reduce((s, x) => s + x.lineNet, 0).toFixed(2));
+      const inserted = db.prepare(`INSERT INTO sale_returns (sale_id,customer_id,return_date,reason,subtotal,vat_total,grand_total,currency,exchange_rate,created_by) VALUES (?,?,?,?,?,?,?,?,?,?)`)
+        .run(saleId, sale.customerId, parsed.data.returnDate, parsed.data.reason, subtotal, Number((grandTotal - subtotal).toFixed(2)), grandTotal, sale.currency, sale.exchangeRate, req.user.id);
+      const returnId = Number(inserted.lastInsertRowid);
+      const number = `IAD-${parsed.data.returnDate.slice(0, 4)}-${String(returnId).padStart(6, "0")}`;
+      db.prepare("UPDATE sale_returns SET number=? WHERE id=?").run(number, returnId);
+      const addLine = db.prepare("INSERT INTO sale_return_items (return_id,sale_item_id,product_id,quantity,vat_rate,line_net,line_total) VALUES (?,?,?,?,?,?,?)");
+      for (const line of lines) addLine.run(returnId, line.id, line.productId, line.returnQuantity, line.vatRate, line.lineNet, line.lineTotal);
+      postLedger({ customerId: sale.customerId, type: "SALE_RETURN", date: parsed.data.returnDate, description: `${sale.number} iade · ${number}`, credit: Number((grandTotal * sale.exchangeRate).toFixed(2)), currency: sale.currency, foreignAmount: grandTotal, rate: sale.exchangeRate, sourceType: "SALE_RETURN", sourceId: returnId, actorId: req.user.id });
+      audit(req.user.id, "SALE_RETURN_CREATED", "sale_return", returnId, null, { number, saleId, ...parsed.data, grandTotal }, req.ip, req.correlationId);
+      return { id: returnId, number, grandTotal };
+    });
+    res.status(201).json({ ...result, message: `${result.number} iadesi kaydedildi; ${result.grandTotal.toLocaleString("tr-TR")} ${sale.currency} cariye alacak işlendi.` });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "İade kaydedilemedi." });
+  }
+});
+
+// Makine sipariş raporu: hangi cariye/bayiye hangi modelden kaç adet sipariş verildiği.
+app.get("/api/reports/machine-orders", (req, res) => {
+  const today = new Date().toISOString().slice(0, 10);
+  const from = typeof req.query.from === "string" && /^\d{4}-\d{2}-\d{2}$/.test(req.query.from) ? req.query.from : `${today.slice(0, 4)}-01-01`;
+  const to = typeof req.query.to === "string" && /^\d{4}-\d{2}-\d{2}$/.test(req.query.to) ? req.query.to : today;
+  const statuses = req.query.includePending === "true" ? ["APPROVED", "COMPLETED", "PENDING_APPROVAL"] : ["APPROVED", "COMPLETED"];
+  const rows = db.prepare(`SELECT c.id customerId,c.code customerCode,c.name customerName,c.city customerCity,
+      EXISTS(SELECT 1 FROM customer_tags ct WHERE ct.customer_id=c.id AND ct.tag='DEALER') isDealer,
+      p.id productId,p.name productName,p.manufacturer_model model,p.product_group productGroup,p.product_subgroup productSubgroup,
+      SUM(si.quantity) quantity,
+      SUM((SELECT COALESCE(SUM(ri.quantity),0) FROM sale_return_items ri WHERE ri.sale_item_id=si.id)) returnedQuantity,
+      SUM((SELECT COALESCE(SUM(shi.quantity),0) FROM shipment_items shi JOIN shipments sh ON sh.id=shi.shipment_id WHERE shi.sale_item_id=si.id AND sh.status<>'CANCELLED')) shippedQuantity,
+      ROUND(SUM(si.line_total*s.exchange_rate),2) tryTotal,
+      COUNT(DISTINCT s.id) orderCount
+    FROM sale_items si JOIN sales s ON s.id=si.sale_id JOIN products p ON p.id=si.product_id JOIN customers c ON c.id=s.customer_id
+    WHERE p.part_category='MACHINE' AND s.status IN (${statuses.map(() => "?").join(",")}) AND date(s.created_at) BETWEEN ? AND ?
+    GROUP BY c.id,p.id ORDER BY c.name,p.product_group,p.name`).all(...statuses, from, to);
+  res.json({ from, to, includePending: statuses.length === 3, rows });
 });
 
 const saveSale = (req: Request, res: Response) => {
@@ -1374,25 +1502,24 @@ const saveSale = (req: Request, res: Response) => {
     if (input.orderKind === "MACHINE" && product.part_category !== "MACHINE") throw new Error("Ana mamul siparişinde yalnızca ana mamul seçilebilir.");
     if (product.stock_tracking && item.quantity > product.stock_quantity)
       throw new Error("Seçilen miktar kullanılabilir stoktan fazla.");
-    const unitPrice = Number(item.unitPrice.toFixed(4));
-    const base = Number((unitPrice * item.quantity).toFixed(2));
-    const vatRate = product.part_category === "MACHINE" ? product.vat_rate : item.vatRate;
+    // Girilen fiyat KDV dahildir. Satır toplamı girilen tutardır; KDV bunun içinden ayrılır.
+    // unit_price sütunu eskisi gibi KDV HARİÇ (net) saklanır ki eski kayıtlar ve e-belgeler tutarlı kalsın.
+    const vatRate = item.vatRate;
+    const divisor = 1 + vatRate / 100;
+    const grossUnit = Number(item.unitPrice.toFixed(4));
+    const lineTotal = Number((grossUnit * item.quantity).toFixed(2));
+    const lineNet = Number((lineTotal / divisor).toFixed(2));
     return {
       ...item,
-      unitPrice,
+      unitPrice: Number((grossUnit / divisor).toFixed(4)),
       vatRate,
-      lineTotal: Number((base + (base * vatRate) / 100).toFixed(2)),
+      lineTotal,
+      lineNet,
     };
   });
-  const subtotal = calculatedItems.reduce(
-    (sum, item) => sum + item.unitPrice * item.quantity,
-    0,
-  );
-  const grandTotal = calculatedItems.reduce(
-    (sum, item) => sum + item.lineTotal,
-    0,
-  );
-  const vatTotal = grandTotal - subtotal;
+  const subtotal = Number(calculatedItems.reduce((sum, item) => sum + item.lineNet, 0).toFixed(2));
+  const grandTotal = Number(calculatedItems.reduce((sum, item) => sum + item.lineTotal, 0).toFixed(2));
+  const vatTotal = Number((grandTotal - subtotal).toFixed(2));
   if (input.advanceAmount * input.exchangeRate > Math.max(0, -Number(customer.balance)) + 0.01) return res.status(400).json({message:"Kullanılabilir cari avans yetersiz."});
   if (input.downPayment + input.advanceAmount > grandTotal)
     return res
@@ -1441,7 +1568,7 @@ const saveSale = (req: Request, res: Response) => {
         );
       const saleId = Number(result.lastInsertRowid);
       const number = previous?.number ?? `SAT-${new Date().getFullYear()}-${String(saleId).padStart(6, "0")}`;
-      db.prepare("UPDATE sales SET order_kind=?,advance_amount=? WHERE id=?").run(input.orderKind,input.advanceAmount,saleId);
+      db.prepare("UPDATE sales SET order_kind=?,advance_amount=?,card_installments=? WHERE id=?").run(input.orderKind,input.advanceAmount,input.paymentMethod==="CREDIT_CARD"?(input.cardInstallments??1):null,saleId);
       db.prepare("UPDATE sales SET number=? WHERE id=?").run(number, saleId);
       const addItem = db.prepare(
         `INSERT INTO sale_items (sale_id, product_id, quantity, unit_price, vat_rate, line_total) VALUES (?, ?, ?, ?, ?, ?)`,
@@ -1716,6 +1843,20 @@ app.post("/api/approvals/:id/decision", allow("ADMIN"), (req, res) => {
           sourceId: approval.entity_id,
           actorId: req.user.id,
         });
+      if (sale.payment_method === "CREDIT_CARD" && sale.grand_total - sale.down_payment - sale.advance_amount > 0)
+        postLedger({
+          customerId: sale.customer_id,
+          type: "CARD_RECEIPT",
+          date: new Date().toISOString().slice(0, 10),
+          description: `${sale.number} kredi kartı tahsilatı`,
+          credit: (sale.grand_total - sale.down_payment - sale.advance_amount) * sale.exchange_rate,
+          currency: sale.currency,
+          foreignAmount: sale.grand_total - sale.down_payment - sale.advance_amount,
+          rate: sale.exchange_rate,
+          sourceType: "CARD_SALE",
+          sourceId: approval.entity_id,
+          actorId: req.user.id,
+        });
       const schedules = db
         .prepare(
           "SELECT * FROM payment_schedules WHERE sale_id=? AND payment_type IN ('CHECK','PROMISSORY_NOTE') AND status='PLANNED' ORDER BY sequence_no",
@@ -1827,7 +1968,7 @@ app.get(
   (req, res) => {
     const sale = db
       .prepare(
-        `SELECT s.id,s.number,s.status,c.id customerId,c.name customerName,c.city FROM sales s JOIN customers c ON c.id=s.customer_id WHERE s.id=?`,
+        `SELECT s.id,s.number,s.status,c.id customerId,c.name customerName,c.city,c.district,c.address FROM sales s JOIN customers c ON c.id=s.customer_id WHERE s.id=?`,
       )
       .get(Number(req.params.id));
     if (!sale) return res.status(404).json({ message: "Satış bulunamadı." });

@@ -14,7 +14,19 @@ export type Customer = {
   externalSystem?: string;
   externalId?: string;
   tags?: string;
+  note?: string | null;
+  district?: string | null;
+  address?: string | null;
 };
+/** Cari türü etiketleri. DB anahtarı (CUSTOMER) korunur; görünen ad fabrikadaki terimdir. */
+export const customerTagLabels: Record<string, string> = {
+  CUSTOMER: "Perakende",
+  DEALER: "Bayi",
+  SUPPLIER: "Tedarikçi",
+};
+/** Bize mal alan cari mi (perakende veya bayi)? */
+export const isBuyer = (tags?: string | null) =>
+  (tags || "CUSTOMER").split(",").some((tag) => tag === "CUSTOMER" || tag === "DEALER");
 export type Product = {
   partCategory: string;
   inventorySource?: string;
@@ -157,6 +169,18 @@ export const statusLabels: Record<string, string> = {
   PARTIALLY_DELIVERED: "Kısmi teslim",
   DELIVERED: "Teslim edildi",
 };
+export const paymentMethodLabels: Record<string, string> = {
+  CASH: "Peşin",
+  TERM: "Vadeli (havale / EFT)",
+  CHECK: "Çek / senet",
+  MIXED: "Peşinat + evrak",
+  CREDIT_CARD: "Kredi kartı",
+  BANK_TRANSFER: "Havale / EFT",
+  PROMISSORY_NOTE: "Senet",
+};
+export const VAT_RATES = [0, 10, 20] as const;
+export const currencySymbol = (currency: string) =>
+  ({ TRY: "₺", USD: "$", EUR: "€" } as Record<string, string>)[currency] || currency;
 export const money = (value: number, currency = "TRY") =>
   new Intl.NumberFormat("tr-TR", {
     style: "currency",
