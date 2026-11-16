@@ -143,6 +143,44 @@ try {
  ledger=await request(admin,`/customers/${eur.created[0].id}/ledger`);
  assert.equal(ledger.customer.balance,1516000);assert.equal(ledger.transactions[0].currency,'EUR');assert.equal(ledger.transactions[0].foreignAmount,30320);
 
+ // Kullanıcı yönetimi: oluşturma, ilk girişte zorunlu parola değişikliği, düzenleme, pasife alma.
+ const loginAs=async(email,password,expected=200)=>{const r=await fetch(base+'/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,password})});assert.equal(r.status,expected,email);return {cookie:r.headers.getSetCookie().map(x=>x.split(';')[0]).join('; '),body:await r.json()};};
+ const newUser={name:'Deniz Yeni',email:'Deniz.Yeni@Celmak.com',role:'SALES',password:'Gecici-Parola-1'};
+ await request(sales,'/admin/users','POST',newUser,403);
+ await request(admin,'/admin/users','POST',{...newUser,password:'kisa'},400);
+ const createdUser=await request(admin,'/admin/users','POST',newUser,201);
+ await request(admin,'/admin/users','POST',{...newUser,email:'deniz.yeni@celmak.com'},409);
+ let deniz=await loginAs('deniz.yeni@celmak.com','Gecici-Parola-1');
+ assert.equal(deniz.body.mustChangePassword,true,'Geçici parolayla ilk girişte değişiklik istenmeli');
+ const blockedCall=await request(deniz.cookie,'/customers','GET',undefined,403);assert.equal(blockedCall.mustChangePassword,true);
+ assert.equal((await request(deniz.cookie,'/session')).currentUser.mustChangePassword,1);
+ await request(deniz.cookie,'/auth/change-password','POST',{currentPassword:'yanlis-parola',newPassword:'Benim-Parolam-2026'},400);
+ await request(deniz.cookie,'/auth/change-password','POST',{currentPassword:'Gecici-Parola-1',newPassword:'Gecici-Parola-1'},400);
+ await request(deniz.cookie,'/auth/change-password','POST',{currentPassword:'Gecici-Parola-1',newPassword:'Benim-Parolam-2026'});
+ await request(deniz.cookie,'/customers');
+ await loginAs('deniz.yeni@celmak.com','Gecici-Parola-1',401);
+ // Düzenleme: ad/e-posta/rol değişir; rol değişince özel yetkiler sıfırlanır.
+ await request(admin,`/admin/users/${createdUser.id}/permissions`,'PUT',{permissions:['DASHBOARD']});
+ await request(admin,`/admin/users/${createdUser.id}`,'PUT',{name:'Deniz Yılmaz',email:'deniz@celmak.com',role:'ACCOUNTING',active:true});
+ const managed=(await request(admin,'/admin/users')).users.find(u=>u.id===createdUser.id);
+ assert.equal(managed.name,'Deniz Yılmaz');assert.equal(managed.email,'deniz@celmak.com');assert.equal(managed.role,'ACCOUNTING');assert.ok(managed.permissions.includes('RECEIPTS'),'Muhasebe varsayılan yetkileri gelmeli');
+ await request(deniz.cookie,'/session','GET',undefined,401);
+ deniz=await loginAs('deniz@celmak.com','Benim-Parolam-2026');
+ // Pasife alma: oturum kapanır, giriş yapılamaz.
+ await request(admin,`/admin/users/${createdUser.id}`,'PUT',{name:'Deniz Yılmaz',email:'deniz@celmak.com',role:'ACCOUNTING',active:false});
+ await request(deniz.cookie,'/session','GET',undefined,401);
+ await loginAs('deniz@celmak.com','Benim-Parolam-2026',401);
+ // Yönetici kendini kilitleyemez.
+ const me=(await request(admin,'/session')).currentUser;
+ await request(admin,`/admin/users/${me.id}`,'PUT',{name:me.name,email:me.email,role:'ADMIN',active:false},409);
+ await request(admin,`/admin/users/${me.id}`,'PUT',{name:me.name,email:me.email,role:'SALES',active:true},409);
+ await request(admin,`/admin/users/${me.id}/password`,'POST',{password:'Baska-Parola-99'},409);
+ // Geçici parola: yeniden etkinleştirilen kullanıcı yeni geçici parolayla girer ve değiştirmesi istenir.
+ await request(admin,`/admin/users/${createdUser.id}`,'PUT',{name:'Deniz Yılmaz',email:'deniz@celmak.com',role:'ACCOUNTING',active:true});
+ await request(admin,`/admin/users/${createdUser.id}/password`,'POST',{password:'Yeni-Gecici-77'});
+ await loginAs('deniz@celmak.com','Benim-Parolam-2026',401);
+ assert.equal((await loginAs('deniz@celmak.com','Yeni-Gecici-77')).body.mustChangePassword,true);
+
  const checksCustomer=await request(sales,'/customers','POST',{name:'Çek Bağlantı Test Cari',riskLimit:5000000},201);
  const checksBalance=async()=> (await request(admin,`/customers/${checksCustomer.id}/ledger`)).customer.balance;
  const checks=[500000,500000,1000000,1000000].map((amount,i)=>({amount,issuer:'Test Keşideci',bankName:'Test Bankası',serialNumber:`BAG-${i}`,issueDate:'2026-10-01',dueDate:`2027-0${i+1}-15`}));
@@ -169,7 +207,7 @@ try {
  assert.equal(history[0].checks[0].status,'COLLECTED');assert.equal(history[0].checks[1].status,'BOUNCED');
  console.log('PASS: eşit olmayan 4 çek, hedef/toplam farkı, grup kaydı, mükerrer/tekrar istek koruması, atomik geri alma, tahsilat ve karşılıksız çek bakiyesi');
  console.log('PASS: parça siparişi, düzenleme, revizyon, onay, 2 milyon avans, makine/parça mahsup, kısmi avans, mükerrer ve yetersiz bakiye kontrolleri');
- console.log('PASS: KDV dahil fiyat, 0/10/20 KDV kısıtı, kredi kartı tahsilatı, iade (sevk/yetki/miktar kontrolleri), makine raporu, cari notu, Excel ile toplu cari, cari düzenleme ve silme, açılış bakiyesi (devir)');
+ console.log('PASS: KDV dahil fiyat, 0/10/20 KDV kısıtı, kredi kartı tahsilatı, iade (sevk/yetki/miktar kontrolleri), makine raporu, cari notu, Excel ile toplu cari, cari düzenleme ve silme, açılış bakiyesi (devir), kullanıcı yönetimi ve parola değiştirme');
 } finally {
  server.kill();await new Promise(r=>server.once('exit',r));
  assert.equal(dirname(resolve(dataDir)),resolve(tmpdir()));

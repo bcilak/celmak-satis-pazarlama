@@ -450,6 +450,8 @@ export function migrate() {
   addColumn('users', 'two_factor_enabled', 'INTEGER NOT NULL DEFAULT 0')
   addColumn('users', 'password_changed_at', 'TEXT')
   addColumn('users', 'permissions_configured', 'INTEGER NOT NULL DEFAULT 0')
+  // Yöneticinin verdiği geçici parolayla giren kullanıcı önce kendi parolasını belirlemelidir.
+  addColumn('users', 'must_change_password', 'INTEGER NOT NULL DEFAULT 0')
   addColumn('customers', 'note', 'TEXT')
   addColumn('customers', 'district', 'TEXT')
   addColumn('customers', 'address', 'TEXT')

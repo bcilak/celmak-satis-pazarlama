@@ -1,5 +1,5 @@
 export type Role = "ADMIN" | "SALES" | "ACCOUNTING" | "SHIPPING" | "AUDITOR";
-export type User = { id: number; name: string; role: Role; email: string; permissions?:string[] };
+export type User = { id: number; name: string; role: Role; email: string; permissions?:string[]; mustChangePassword?: number | boolean };
 export type Customer = {
   id: number;
   code: string;

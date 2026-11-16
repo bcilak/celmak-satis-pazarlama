@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { NavLink } from "react-router-dom";
 import { api } from "./api";
 import { statusLabels } from "./types";
+import { MoneyInput } from "./OrderTools";
 
 const today = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Istanbul", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 const money = (n: number, currency = "TRY") => new Intl.NumberFormat("tr-TR", { style: "currency", currency }).format(n);
@@ -37,7 +38,7 @@ export function CheckAdvanceForm({ customerId, onSaved, onCancel }: { customerId
     {error && <div className="error-box" role="alert">{error}</div>}
     <fieldset disabled={busy}>
       <div className="form-grid">
-        <label className="field"><span>Bağlantı hedef tutarı (isteğe bağlı)</span><input type="number" min="0.01" step="0.01" value={target} onChange={e => setTarget(e.target.value)} placeholder="Örn. 2000000" /></label>
+        <label className="field"><span>Bağlantı hedef tutarı (isteğe bağlı)</span><MoneyInput currency={currency} value={Number(target) || 0} onChange={v => setTarget(v ? String(v) : "")} placeholder="Örn. 2.000.000" /></label>
         <label className="field"><span>Çeklerin teslim alındığı tarih</span><input required type="date" value={receivedDate} onChange={e => setReceivedDate(e.target.value)} /></label>
         <label className="field"><span>Para birimi</span><select value={currency} onChange={e => { setCurrency(e.target.value); setRate(1); }}><option>TRY</option><option>USD</option><option>EUR</option></select></label>
         <label className="field"><span>Teslim alma kuru</span><input required type="number" min="0.0001" step="0.0001" readOnly={currency === "TRY"} value={rate} onChange={e => setRate(Number(e.target.value))} /></label>
@@ -45,7 +46,7 @@ export function CheckAdvanceForm({ customerId, onSaved, onCancel }: { customerId
       {checks.map((c, index) => <section className="advance-check-row" key={c.key}>
         <div className="head-actions"><h3>{index + 1}. çek</h3><button type="button" className="mini-btn" disabled={checks.length === 1} onClick={() => setChecks(rows => rows.filter(x => x.key !== c.key))}>Çeki kaldır</button></div>
         <div className="form-grid">
-          <label className="field"><span>Çek tutarı ({currency})</span><input required type="number" min="0.01" step="0.01" value={c.amount} onChange={e => change(c.key, "amount", e.target.value)} /></label>
+          <label className="field"><span>Çek tutarı</span><MoneyInput required currency={currency} value={Number(c.amount) || 0} onChange={v => change(c.key, "amount", v ? String(v) : "")} /></label>
           <label className="field"><span>Keşideci / borçlu</span><input required minLength={2} maxLength={160} value={c.issuer} onChange={e => change(c.key, "issuer", e.target.value)} /></label>
           <label className="field"><span>Banka</span><input required minLength={2} maxLength={120} value={c.bankName} onChange={e => change(c.key, "bankName", e.target.value)} /></label>
           <label className="field"><span>Seri / çek numarası</span><input required maxLength={80} value={c.serialNumber} onChange={e => change(c.key, "serialNumber", e.target.value)} /></label>

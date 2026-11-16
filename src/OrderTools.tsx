@@ -37,6 +37,7 @@ export function MoneyInput({
   required,
   placeholder = "0,00",
   invalid,
+  readOnly,
 }: {
   value: number;
   onChange: (value: number) => void;
@@ -44,6 +45,7 @@ export function MoneyInput({
   required?: boolean;
   placeholder?: string;
   invalid?: boolean;
+  readOnly?: boolean;
 }) {
   // Yazarken kullanıcının metni korunur; odak yokken metin her zaman değerden türetilir
   // (ör. "tutarları eşit dağıt" sonrası güncel tutar görünür).
@@ -80,6 +82,7 @@ export function MoneyInput({
         inputMode="decimal"
         autoComplete="off"
         required={required}
+        readOnly={readOnly}
         placeholder={placeholder}
         value={shown}
         onChange={handle}

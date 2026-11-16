@@ -282,3 +282,42 @@
 @media (max-width:760px){.section-row{grid-template-columns:20px 1fr}.section-row em{grid-column:2}}
 .review-warning{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between}
 .confirm-cell{display:inline-flex;flex-wrap:wrap;gap:6px;align-items:center}
+
+/* ---- Kullanıcı yönetimi ve parola ---- */
+.user-head{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding-bottom:16px;border-bottom:1px solid var(--line);margin-bottom:16px}
+.user-head>div:nth-child(2){flex:1;min-width:200px}
+.user-head h2{font:700 18px Manrope;margin:2px 0}
+.user-head p{margin:0;font-size:12px;color:var(--muted)}
+.avatar.large{width:48px;height:48px;font-size:16px}
+.you-badge{font-style:normal;font-size:10px;font-weight:800;background:#e3ebe7;color:#174f42;border-radius:10px;padding:1px 7px;margin-left:6px}
+.user-flags{display:flex;gap:4px;flex-wrap:wrap;margin-top:3px}
+.user-flags em{font-style:normal;font-size:10px;font-weight:700;border-radius:10px;padding:1px 7px}
+.flag-off{background:#eef2f0;color:#54615c}
+.flag-wait{background:#fff0de;color:#a75b1e}
+.inactive-user{opacity:.6}
+.user-form{display:grid;gap:12px;border:1px solid var(--line);background:#fafcfb;border-radius:12px;padding:16px;margin-bottom:16px}
+.user-form h3{font:700 15px Manrope;margin:0}
+.user-form .head-actions{justify-content:flex-end}
+.warn-text{color:#a75b1e}
+.password-input{display:flex;align-items:stretch;border:1px solid #ccd6d2;border-radius:9px;background:#fff;overflow:hidden}
+.password-input:focus-within{border-color:#418373;box-shadow:0 0 0 3px #dcece7}
+.password-field .password-input input{border:0!important;box-shadow:none!important;flex:1;min-width:0;font-family:ui-monospace,Consolas,monospace;letter-spacing:.5px}
+.password-input button{border:0;border-left:1px solid #e2e8e5;background:#f7f9f8;padding:0 10px;display:grid;place-items:center;color:#4d5b56;cursor:pointer}
+.password-input button svg{width:16px;height:16px}
+.password-field small{font-size:11px;color:var(--muted)}
+.password-change{display:grid;gap:12px;max-width:440px}
+.password-change .primary-btn{justify-self:start}
+.security-password{display:grid;grid-template-columns:minmax(220px,1fr) minmax(280px,440px);gap:24px;padding:20px 22px;margin-bottom:18px}
+.security-password h2{font:700 17px Manrope;margin:4px 0}
+.security-password p{margin:0;font-size:12px;color:var(--muted)}
+.forced-password{min-height:100vh;display:grid;place-items:center;background:#f4f6f4;padding:24px}
+.forced-password>.panel{max-width:480px;width:100%;padding:28px;display:grid;gap:12px}
+.forced-password>.panel>svg{width:34px;height:34px;color:var(--green2)}
+.forced-password h1{font:800 22px Manrope;margin:0}
+.forced-password p{margin:0;color:var(--muted);font-size:13px;line-height:1.5}
+.forced-password .password-change{max-width:none}
+.forced-password .text-btn{justify-self:start}
+@media (max-width:760px){.security-password{grid-template-columns:1fr}}
+.user-form .form-grid{align-items:start}
+.user-form .password-field{grid-column:1/-1}
+.password-input input{min-width:120px}

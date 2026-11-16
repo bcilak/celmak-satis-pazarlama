@@ -112,6 +112,8 @@ type AppUser = {
   role: "ADMIN" | "SALES" | "ACCOUNTING" | "SHIPPING" | "AUDITOR";
   email: string;
   permissions:string[];
+  /** 1 ise kullanıcı yöneticinin verdiği geçici parolayı henüz değiştirmedi. */
+  mustChangePassword?: number;
 };
 const permissionKeys=["DASHBOARD","CUSTOMERS","SALES","INSTRUMENTS","RECEIPTS","APPROVALS","SHIPMENTS","EDOCUMENTS","AUDIT","SECURITY","USER_MANAGEMENT"] as const;
 type PermissionKey=(typeof permissionKeys)[number];
@@ -146,6 +148,11 @@ const passwordValid = (password: string, stored: string) => {
     timingSafeEqual(Buffer.from(hash, "hex"), scryptSync(password, salt, 64)),
   );
 };
+const hashPassword = (password: string) => {
+  const salt = randomBytes(16).toString("hex");
+  return `${salt}:${scryptSync(password, salt, 64).toString("hex")}`;
+};
+const passwordRule = z.string().min(10, "Parola en az 10 karakter olmalıdır.").max(200);
 const tokenHash = (token: string) =>
   createHash("sha256").update(token).digest("hex");
 const cookieToken = (req: Request) =>
@@ -212,6 +219,7 @@ app.post("/api/auth/login", (req, res) => {
         password_hash: string;
         two_factor_enabled: number;
         totp_secret: string | null;
+        must_change_password: number;
       }
     | undefined;
   if (!user || !passwordValid(parsed.data.password, user.password_hash))
@@ -256,6 +264,7 @@ app.post("/api/auth/login", (req, res) => {
   );
   res.json({
     user: { id: user.id, name: user.name, email: user.email, role: user.role },
+    mustChangePassword: Boolean(user.must_change_password),
   });
 });
 
@@ -296,12 +305,10 @@ app.post("/api/auth/reset-password", (req, res) => {
     return res
       .status(400)
       .json({ message: "Bağlantı geçersiz veya süresi dolmuş." });
-  const salt = randomBytes(16).toString("hex");
-  const hash = scryptSync(parsed.data.password, salt, 64).toString("hex");
   transaction(() => {
     db.prepare(
-      "UPDATE users SET password_hash=?,password_changed_at=CURRENT_TIMESTAMP WHERE id=?",
-    ).run(`${salt}:${hash}`, row.user_id);
+      "UPDATE users SET password_hash=?,password_changed_at=CURRENT_TIMESTAMP,must_change_password=0 WHERE id=?",
+    ).run(hashPassword(parsed.data.password), row.user_id);
     db.prepare(
       "UPDATE password_reset_tokens SET used_at=CURRENT_TIMESTAMP WHERE id=?",
     ).run(row.id);
@@ -423,7 +430,7 @@ app.use("/api", (req, res, next) => {
   if (token) {
     user = db
       .prepare(
-        `SELECT u.id,u.name,u.role,u.email FROM auth_sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.revoked_at IS NULL AND s.expires_at>CURRENT_TIMESTAMP AND u.active=1`,
+        `SELECT u.id,u.name,u.role,u.email,u.must_change_password mustChangePassword FROM auth_sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.revoked_at IS NULL AND s.expires_at>CURRENT_TIMESTAMP AND u.active=1`,
       )
       .get(tokenHash(token)) as AppUser | undefined;
     if (user)
@@ -439,7 +446,27 @@ app.use("/api", (req, res, next) => {
     return res.status(401).json({ message: "Oturum açmanız gerekiyor." });
   user.permissions=permissionsFor(user);
   req.user = user;
+  const allowedWhileChanging = ["/session", "/auth/change-password", "/auth/logout"];
+  if (user.mustChangePassword && !allowedWhileChanging.includes(req.path))
+    return res.status(403).json({ message: "Devam etmeden önce yöneticinizin verdiği geçici parolayı değiştirin.", mustChangePassword: true });
   next();
+});
+
+// Kullanıcının kendi parolasını değiştirmesi (geçici parola sonrası zorunlu).
+app.post("/api/auth/change-password", (req, res) => {
+  const parsed = z.object({ currentPassword: z.string().min(1), newPassword: passwordRule }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ message: parsed.error.issues[0]?.message || "Parola bilgileri geçersiz." });
+  const row = db.prepare("SELECT password_hash FROM users WHERE id=?").get(req.user.id) as { password_hash: string } | undefined;
+  if (!row || !passwordValid(parsed.data.currentPassword, row.password_hash)) return res.status(400).json({ message: "Mevcut parola hatalı." });
+  if (parsed.data.currentPassword === parsed.data.newPassword) return res.status(400).json({ message: "Yeni parola mevcut paroladan farklı olmalıdır." });
+  const current = cookieToken(req);
+  transaction(() => {
+    db.prepare("UPDATE users SET password_hash=?,password_changed_at=CURRENT_TIMESTAMP,must_change_password=0 WHERE id=?").run(hashPassword(parsed.data.newPassword), req.user.id);
+    // Bu oturum açık kalır, diğer cihazlardaki oturumlar kapatılır.
+    db.prepare("UPDATE auth_sessions SET revoked_at=CURRENT_TIMESTAMP WHERE user_id=? AND revoked_at IS NULL AND token_hash<>?").run(req.user.id, current ? tokenHash(current) : "");
+    audit(req.user.id, "PASSWORD_CHANGED", "user", req.user.id, null, { otherSessionsClosed: true }, req.ip, req.correlationId);
+  });
+  res.json({ message: "Parolanız değiştirildi. Diğer cihazlardaki oturumlarınız kapatıldı." });
 });
 
 const allow =
@@ -663,8 +690,77 @@ app.get("/api/session", (req, res) => {
 });
 
 app.get("/api/admin/users",allow("ADMIN"),(_req,res)=>{
-  const users=db.prepare("SELECT id,name,role,email,active FROM users ORDER BY name").all() as {id:number;name:string;role:AppUser["role"];email:string;active:number}[];
-  res.json({permissions:permissionKeys,users:users.map(user=>({...user,active:Boolean(user.active),permissions:permissionsFor(user)}))});
+  const users=db.prepare(`SELECT id,name,role,email,active,must_change_password mustChangePassword,
+    (SELECT MAX(created_at) FROM auth_sessions s WHERE s.user_id=users.id) lastLoginAt FROM users ORDER BY active DESC,name`).all() as {id:number;name:string;role:AppUser["role"];email:string;active:number;mustChangePassword:number;lastLoginAt:string|null}[];
+  res.json({permissions:permissionKeys,users:users.map(user=>({...user,active:Boolean(user.active),mustChangePassword:Boolean(user.mustChangePassword),permissions:permissionsFor(user)}))});
+});
+
+const roleEnum = z.enum(["ADMIN", "SALES", "ACCOUNTING", "SHIPPING", "AUDITOR"]);
+const userFields = {
+  name: z.string().trim().min(3, "Ad soyad en az 3 karakter olmalıdır.").max(120),
+  email: z.string().trim().toLowerCase().email("Geçerli bir e-posta yazın.").max(160),
+  role: roleEnum,
+};
+const emailTaken = (email: string, exceptId = 0) =>
+  Boolean(db.prepare("SELECT 1 FROM users WHERE lower(email)=lower(?) AND id<>?").get(email, exceptId));
+const activeAdminCount = (exceptId = 0) =>
+  (db.prepare("SELECT COUNT(*) n FROM users WHERE role='ADMIN' AND active=1 AND id<>?").get(exceptId) as { n: number }).n;
+
+app.post("/api/admin/users", allow("ADMIN"), (req, res) => {
+  const parsed = z.object({ ...userFields, password: passwordRule }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ message: parsed.error.issues[0]?.message || "Kullanıcı bilgileri geçersiz." });
+  const input = parsed.data;
+  if (emailTaken(input.email)) return res.status(409).json({ message: "Bu e-posta adresiyle kayıtlı bir kullanıcı var." });
+  // Parola her zaman burada belirlenir; boş parolalı kullanıcı açılışta demo parolası alırdı.
+  const id = transaction(() => {
+    const result = db.prepare("INSERT INTO users (name,role,email,active,password_hash,password_changed_at,must_change_password) VALUES (?,?,?,1,?,CURRENT_TIMESTAMP,1)")
+      .run(input.name, input.role, input.email, hashPassword(input.password));
+    const newId = Number(result.lastInsertRowid);
+    audit(req.user.id, "USER_CREATED", "user", newId, null, { name: input.name, email: input.email, role: input.role }, req.ip, req.correlationId);
+    return newId;
+  });
+  res.status(201).json({ id, message: `${input.name} kullanıcısı oluşturuldu. İlk girişte geçici parolasını değiştirmesi istenecek.` });
+});
+
+app.put("/api/admin/users/:id", allow("ADMIN"), (req, res) => {
+  const parsed = z.object({ ...userFields, active: z.boolean() }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ message: parsed.error.issues[0]?.message || "Kullanıcı bilgileri geçersiz." });
+  const id = Number(req.params.id);
+  const previous = db.prepare("SELECT id,name,email,role,active FROM users WHERE id=?").get(id) as { id: number; name: string; email: string; role: AppUser["role"]; active: number } | undefined;
+  if (!previous) return res.status(404).json({ message: "Kullanıcı bulunamadı." });
+  const input = parsed.data;
+  if (id === req.user.id && !input.active) return res.status(409).json({ message: "Kendi hesabınızı pasife alamazsınız." });
+  if (id === req.user.id && input.role !== "ADMIN") return res.status(409).json({ message: "Kendi yöneticilik rolünüzü kaldıramazsınız; başka bir yönetici yapmalıdır." });
+  if (previous.role === "ADMIN" && previous.active && (input.role !== "ADMIN" || !input.active) && activeAdminCount(id) === 0)
+    return res.status(409).json({ message: "Sistemde en az bir aktif yönetici kalmalıdır." });
+  if (emailTaken(input.email, id)) return res.status(409).json({ message: "Bu e-posta adresi başka bir kullanıcıda kayıtlı." });
+  transaction(() => {
+    db.prepare("UPDATE users SET name=?,email=?,role=?,active=? WHERE id=?").run(input.name, input.email, input.role, input.active ? 1 : 0, id);
+    // Rol değişince eski rolün özel ekran yetkileri temizlenir; yeni rolün varsayılanları geçerli olur.
+    if (input.role !== previous.role) {
+      db.prepare("DELETE FROM user_permissions WHERE user_id=?").run(id);
+      db.prepare("UPDATE users SET permissions_configured=0 WHERE id=?").run(id);
+    }
+    if (!input.active || input.email !== previous.email)
+      db.prepare("UPDATE auth_sessions SET revoked_at=CURRENT_TIMESTAMP WHERE user_id=? AND revoked_at IS NULL").run(id);
+    audit(req.user.id, "USER_UPDATED", "user", id, previous, input, req.ip, req.correlationId);
+  });
+  res.json({ message: `${input.name} kullanıcısı güncellendi.${!input.active && previous.active ? " Hesap pasife alındı ve açık oturumları kapatıldı." : ""}` });
+});
+
+app.post("/api/admin/users/:id/password", allow("ADMIN"), (req, res) => {
+  const parsed = z.object({ password: passwordRule }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ message: parsed.error.issues[0]?.message || "Parola geçersiz." });
+  const id = Number(req.params.id);
+  if (id === req.user.id) return res.status(409).json({ message: "Kendi parolanızı Güvenlik ekranından değiştirin." });
+  const target = db.prepare("SELECT id,name FROM users WHERE id=?").get(id) as { id: number; name: string } | undefined;
+  if (!target) return res.status(404).json({ message: "Kullanıcı bulunamadı." });
+  transaction(() => {
+    db.prepare("UPDATE users SET password_hash=?,password_changed_at=CURRENT_TIMESTAMP,must_change_password=1 WHERE id=?").run(hashPassword(parsed.data.password), id);
+    db.prepare("UPDATE auth_sessions SET revoked_at=CURRENT_TIMESTAMP WHERE user_id=? AND revoked_at IS NULL").run(id);
+    audit(req.user.id, "USER_PASSWORD_RESET", "user", id, null, { by: req.user.id }, req.ip, req.correlationId);
+  });
+  res.json({ message: `${target.name} için geçici parola belirlendi. Açık oturumları kapatıldı; ilk girişte parolasını değiştirmesi istenecek.` });
 });
 app.put("/api/admin/users/:id/permissions",allow("ADMIN"),(req,res)=>{
   const parsed=z.object({permissions:z.array(z.enum(permissionKeys)).max(permissionKeys.length)}).safeParse(req.body);

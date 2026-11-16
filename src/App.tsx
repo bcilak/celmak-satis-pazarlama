@@ -45,6 +45,7 @@ import { api } from "./api";
 import { CheckAdvanceForm, CheckAdvanceHistory } from "./CheckAdvances";
 import { CustomerImport } from "./CustomerImport";
 import { OpeningBalanceImport } from "./OpeningBalanceImport";
+import { ForcedPasswordChange, PasswordChangeForm, TemporaryPasswordForm, UserForm } from "./UserManagement";
 import {
   CustomerNoteEditor,
   MachineReport,
@@ -221,6 +222,9 @@ function App() {
     await api("/auth/logout", { method: "POST" });
     setSession(null);
   };
+  // Yöneticinin verdiği geçici parolayla giren kullanıcı önce kendi parolasını belirler.
+  if (session.currentUser.mustChangePassword)
+    return <ForcedPasswordChange user={session.currentUser} onDone={loadSession} onLogout={logout} />;
   const can=(permission:string)=>session.currentUser.role==="ADMIN"||Boolean(session.currentUser.permissions?.includes(permission));
   const menu=[
     ["DASHBOARD","/","Ana Sayfa",<LayoutDashboard/>],
@@ -236,7 +240,7 @@ function App() {
     ["EDOCUMENTS","/e-belgeler","e-Belgeler",<FileText/>],
     ["AUDIT","/loglar","İşlem Geçmişi",<ShieldCheck/>],
     ["SECURITY","/guvenlik","Güvenlik",<ShieldCheck/>],
-    ["USER_MANAGEMENT","/kullanici-yetkileri","Kullanıcı Yetkileri",<Users/>],
+    ["USER_MANAGEMENT","/kullanici-yetkileri","Kullanıcılar",<Users/>],
   ] as const;
   const guard=(permission:string,element:ReactNode)=>can(permission)?element:<Empty title="Erişim yok" text="Bu ekran yöneticiniz tarafından hesabınıza açılmamış."/>;
   return (
@@ -2207,6 +2211,9 @@ function Receipts({ user, advanceOnly=false }: { user: User; advanceOnly?:boolea
     }
   };
   const selectedSchedule=ledger?.schedules.find(x=>x.id===scheduleId);
+  // Vadeli tahsilatta tutar, seçilen vadenin kalan tutarını aşamaz (sunucu da ayrıca kontrol eder).
+  const scheduleRemaining=receiptMode==="SCHEDULE"&&selectedSchedule?selectedSchedule.remainingAmount:undefined;
+  const receiptOverLimit=scheduleRemaining!==undefined&&Number(receiptAmount)>scheduleRemaining+0.005;
   const instrumentIncomplete=receiptMode==="INSTRUMENT"&&selectedSchedule&&(!selectedSchedule.instrumentId||!selectedSchedule.issuer||!selectedSchedule.serialNumber||(selectedSchedule.paymentType==="CHECK"&&!selectedSchedule.bankName));
   return (
     <>
@@ -2337,16 +2344,15 @@ function Receipts({ user, advanceOnly=false }: { user: User; advanceOnly?:boolea
               </div>
               <label className="field">
                 <span>Tutar</span>
-                  <input
-                    required
-                    type="number"
-                    min="0.01"
-                    step="0.01"
-                    readOnly={receiptMode==="INSTRUMENT"}
-                    max={receiptMode==="SCHEDULE"&&scheduleId?ledger.schedules.find(x=>x.id===scheduleId)?.remainingAmount:undefined}
-                    value={receiptAmount}
-                    onChange={e=>setReceiptAmount(e.target.value)}
+                <MoneyInput
+                  required
+                  currency={currency}
+                  readOnly={receiptMode==="INSTRUMENT"}
+                  invalid={receiptOverLimit}
+                  value={Number(receiptAmount)||0}
+                  onChange={value=>setReceiptAmount(value?String(value):"")}
                 />
+                {receiptOverLimit&&<small className="danger-text">Tutar seçilen vadenin kalan tutarını ({money(scheduleRemaining||0,currency)}) aşamaz.</small>}
               </label>
               {!(receiptMode==="GENERAL"&&receiptMethod==="CHECK")&&<label className="field">
                 <span>Tahsilat tarihi</span>
@@ -2365,7 +2371,7 @@ function Receipts({ user, advanceOnly=false }: { user: User; advanceOnly?:boolea
                 <span>{advanceOnly?"Bağlantı yılı / açıklama":"Not"}</span>
                 <input name="note" maxLength={500} placeholder={advanceOnly?"Örn. 2026 yıllık bağlantı avansı":undefined} />
               </label>
-              <button className="primary-btn full" disabled={saving||!receiptAmount||Number(receiptAmount)<=0||(receiptMode!=="GENERAL"&&!scheduleId)||!!instrumentIncomplete}>
+              <button className="primary-btn full" disabled={saving||!receiptAmount||Number(receiptAmount)<=0||receiptOverLimit||(receiptMode!=="GENERAL"&&!scheduleId)||!!instrumentIncomplete}>
                 {saving?"Kaydediliyor…":advanceOnly?"Avansı cariye kaydet":receiptMode==="INSTRUMENT"?"Evrakı tahsil et":receiptMode==="SCHEDULE"?"Seçili vadeye tahsilat işle":receiptMethod==="CHECK"?"Çeki portföye al ve cariden düş":"Genel tahsilatı cariye işle"}
               </button>
             </form>
@@ -3620,19 +3626,42 @@ function EDocuments({ user }: { user: User }) {
 }
 
 function UserPermissions({currentUser}:{currentUser:User}){
-  type ManagedUser=User&{active:boolean;permissions:string[]};
+  type ManagedUser=User&{active:boolean;permissions:string[];mustChangePassword?:boolean;lastLoginAt?:string|null};
   type Response={permissions:string[];users:ManagedUser[]};
 const labels:Record<string,{title:string;description:string}>={DASHBOARD:{title:"Ana Sayfa",description:"Günlük özet ve bildirimler"},CUSTOMERS:{title:"Cariler",description:"Müşteri, bayi ve tedarikçi cari kartları"},SALES:{title:"Siparişler",description:"Sipariş listesi ve yeni sipariş"},INSTRUMENTS:{title:"Çek ve Senetler",description:"Çek ve senet işlemleri"},RECEIPTS:{title:"Tahsilatlar",description:"Cari ekstre, vadeler ve alınan ödemeler"},APPROVALS:{title:"Onaylar",description:"Onay, ret ve düzeltme kararları"},SHIPMENTS:{title:"Sevkiyatlar",description:"Sevkiyat planlama ve teslimat"},EDOCUMENTS:{title:"e-Belgeler",description:"e-Fatura, e-Arşiv ve e-İrsaliye"},AUDIT:{title:"İşlem Geçmişi",description:"Değiştirilemez işlem geçmişi"},SECURITY:{title:"Güvenlik",description:"İki aşamalı doğrulama, passkey ve cihazlar"},USER_MANAGEMENT:{title:"Kullanıcı Yetkileri",description:"Kullanıcı ekran erişimlerini yönetme"}};
   const [data,setData]=useState<Response|null>(null);const [selectedId,setSelectedId]=useState(0);const [draft,setDraft]=useState<string[]>([]);const [message,setMessage]=useState("");
-  const load=useCallback(()=>api<Response>("/admin/users").then(result=>{setData(result);const id=selectedId||result.users.find(x=>x.role!=="ADMIN")?.id||result.users[0]?.id||0;setSelectedId(id);setDraft(result.users.find(x=>x.id===id)?.permissions||[])}),[selectedId]);
+  // Sağ paneldeki çalışma modu: yetkiler (varsayılan), bilgileri düzenleme, geçici parola veya yeni kullanıcı.
+  const [mode,setMode]=useState<"permissions"|"edit"|"password"|"create">("permissions");
+  const load=useCallback((preferId?:number)=>api<Response>("/admin/users").then(result=>{setData(result);const id=preferId||selectedId||result.users.find(x=>x.role!=="ADMIN")?.id||result.users[0]?.id||0;setSelectedId(id);setDraft(result.users.find(x=>x.id===id)?.permissions||[])}),[selectedId]);
   useEffect(()=>{if(currentUser.role==="ADMIN")load()},[currentUser.role,load]);
-  if(currentUser.role!=="ADMIN")return <Empty title="Kullanıcı Yetkileri" text="Bu ekran yalnızca yöneticilere açıktır."/>;
-  if(!data)return <div className="loading">Yetkiler hazırlanıyor…</div>;
+  if(currentUser.role!=="ADMIN")return <Empty title="Kullanıcılar" text="Bu ekran yalnızca yöneticilere açıktır."/>;
+  if(!data)return <div className="loading">Kullanıcılar hazırlanıyor…</div>;
   const selected=data.users.find(x=>x.id===selectedId);const isAdmin=selected?.role==="ADMIN";
-  const selectUser=(id:number)=>{setSelectedId(id);setDraft(data.users.find(x=>x.id===id)?.permissions||[]);setMessage("")};
+  const selectUser=(id:number)=>{setSelectedId(id);setDraft(data.users.find(x=>x.id===id)?.permissions||[]);setMessage("");setMode("permissions")};
   const toggle=(key:string)=>setDraft(draft.includes(key)?draft.filter(x=>x!==key):[...draft,key]);
   const save=async()=>{if(!selected)return;try{const result=await api<{message:string}>(`/admin/users/${selected.id}/permissions`,{method:"PUT",body:JSON.stringify({permissions:draft})});setMessage(result.message);const users=data.users.map(x=>x.id===selected.id?{...x,permissions:draft}:x);setData({...data,users})}catch(e){setMessage((e as Error).message)}};
-  return <><PageHead eyebrow="YÖNETİM" title="Kullanıcı yetkileri" description="Kullanıcının sol menüde göreceği ve erişebileceği modülleri belirleyin."/><ScreenGuide title="Bir çalışanın görebileceği ekranları seçin." steps={["Soldan çalışanı seçin.","Kullanması gereken ekranları işaretleyin.","Yetkileri kaydet düğmesine basın."]} note="Yönetici hesaplarının erişimi kapatılamaz. Ekranı açmak, kullanıcının rolü dışındaki kritik işlemleri yapmasına izin vermez."/>{message&&<Toast text={message} close={()=>setMessage("")}/>}<div className="permission-layout"><section className="panel permission-users"><PanelTitle title="Kullanıcılar"/><div>{data.users.map(user=><button className={selectedId===user.id?"selected":""} onClick={()=>selectUser(user.id)} key={user.id}><span className="avatar">{user.name.split(" ").map(x=>x[0]).join("").slice(0,2)}</span><span><b>{user.name}</b><small>{roleLabels[user.role]} · {user.email}</small></span><em>{user.permissions.length} ekran</em></button>)}</div></section><section className="panel permission-editor"><div className="permission-head"><div><span className="eyebrow">ERİŞİM AYARLARI</span><h2>{selected?.name}</h2><p>{isAdmin?"Yönetici hesapları güvenlik nedeniyle bütün ekranlara erişir.":"İşaretlenen ekranlar kullanıcının sol menüsünde görünür."}</p></div><button className="primary-btn" disabled={isAdmin} onClick={save}>Yetkileri kaydet</button></div><div className="permission-grid">{data.permissions.map(key=>{const meta=labels[key]||{title:key,description:""};const checked=isAdmin||draft.includes(key);return <label className={checked?"checked":""} key={key}><input type="checkbox" checked={checked} disabled={isAdmin} onChange={()=>toggle(key)}/><span><b>{meta.title}</b><small>{meta.description}</small></span><CheckCircle2/></label>})}</div><div className="permission-note"><ShieldCheck/><span><b>Sunucu koruması etkin</b><small>Menüde gizlenen bir ekrana adres yazarak veya doğrudan API isteğiyle erişilemez. Rolün izin vermediği işlem, ekran seçilmiş olsa bile açılamaz.</small></span></div></section></div></>
+  const done=(text:string,id?:number)=>{setMessage(text);setMode("permissions");load(id)};
+  const initials=(name:string)=>name.split(" ").filter(Boolean).map(x=>x[0]).join("").slice(0,2).toLocaleUpperCase("tr");
+  const activeCount=data.users.filter(u=>u.active).length;
+  return <><PageHead eyebrow="YÖNETİM" title="Kullanıcılar ve yetkiler" description="Çalışanlar için hesap açın, bilgilerini güncelleyin ve görebilecekleri ekranları belirleyin." action={<button className="primary-btn" onClick={()=>{setMode("create");setMessage("")}}><Plus/>Yeni kullanıcı</button>}/>
+    <ScreenGuide title="Çalışan hesaplarını buradan yönetin." steps={["Yeni çalışan için Yeni kullanıcı ile hesap açın; geçici parolayı kendisine iletin.","Soldan çalışanı seçip bilgilerini düzenleyin, gerekirse pasife alın veya geçici parola verin.","Kullanması gereken ekranları işaretleyip yetkileri kaydedin."]} note="Geçici parolayla giren kullanıcıdan ilk girişte kendi parolasını belirlemesi istenir. Ayrılan çalışanı silmek yerine pasife alın; geçmiş kayıtlarda adı korunur."/>
+    {message&&<Toast text={message} close={()=>setMessage("")}/>}
+    <div className="permission-layout"><section className="panel permission-users"><PanelTitle title={`Kullanıcılar (${activeCount} aktif)`}/><div>{data.users.map(user=><button className={`${selectedId===user.id&&mode!=="create"?"selected":""} ${user.active?"":"inactive-user"}`} onClick={()=>selectUser(user.id)} key={user.id}><span className="avatar">{initials(user.name)}</span><span><b>{user.name}{user.id===currentUser.id&&<i className="you-badge">Siz</i>}</b><small>{roleLabels[user.role]} · {user.email}</small>{(!user.active||user.mustChangePassword)&&<small className="user-flags">{!user.active&&<em className="flag-off">Pasif</em>}{user.mustChangePassword&&<em className="flag-wait">İlk giriş / parola bekliyor</em>}</small>}</span><em>{user.role==="ADMIN"?"Tümü":`${user.permissions.length} ekran`}</em></button>)}</div></section>
+    <section className="panel permission-editor">
+      {mode==="create"?<UserForm currentUserId={currentUser.id} onSaved={done} onCancel={()=>setMode("permissions")}/>
+      :!selected?<EmptyInline text="Soldan bir kullanıcı seçin."/>
+      :<>
+        <div className="user-head">
+          <span className="avatar large">{initials(selected.name)}</span>
+          <div><span className="eyebrow">{roleLabels[selected.role].toLocaleUpperCase("tr")}{selected.active?"":" · PASİF"}</span><h2>{selected.name}</h2><p>{selected.email} · {selected.lastLoginAt?`son giriş ${formatDate(selected.lastLoginAt)}`:"henüz giriş yapmadı"}</p></div>
+          <div className="head-actions"><button className="mini-btn" onClick={()=>setMode(mode==="edit"?"permissions":"edit")}><Pencil/>Bilgileri düzenle</button>{selected.id!==currentUser.id&&<button className="mini-btn" onClick={()=>setMode(mode==="password"?"permissions":"password")}><ShieldCheck/>Geçici parola ver</button>}</div>
+        </div>
+        {mode==="edit"&&<UserForm key={selected.id} initial={selected} currentUserId={currentUser.id} onSaved={done} onCancel={()=>setMode("permissions")}/>}
+        {mode==="password"&&<TemporaryPasswordForm key={selected.id} user={selected} onDone={done} onCancel={()=>setMode("permissions")}/>}
+        {selected.id===currentUser.id&&mode==="permissions"&&<p className="info-note">Kendi parolanızı <NavLink to="/guvenlik">Güvenlik</NavLink> ekranından değiştirebilirsiniz.</p>}
+        <div className="permission-head"><div><span className="eyebrow">ERİŞİM AYARLARI</span><h2>Görebileceği ekranlar</h2><p>{isAdmin?"Yönetici hesapları güvenlik nedeniyle bütün ekranlara erişir.":"İşaretlenen ekranlar kullanıcının sol menüsünde görünür."}</p></div><button className="primary-btn" disabled={isAdmin} onClick={save}>Yetkileri kaydet</button></div><div className="permission-grid">{data.permissions.map(key=>{const meta=labels[key]||{title:key,description:""};const checked=isAdmin||draft.includes(key);return <label className={checked?"checked":""} key={key}><input type="checkbox" checked={checked} disabled={isAdmin} onChange={()=>toggle(key)}/><span><b>{meta.title}</b><small>{meta.description}</small></span><CheckCircle2/></label>})}</div><div className="permission-note"><ShieldCheck/><span><b>Sunucu koruması etkin</b><small>Menüde gizlenen bir ekrana adres yazarak veya doğrudan API isteğiyle erişilemez. Rolün izin vermediği işlem, ekran seçilmiş olsa bile açılamaz.</small></span></div>
+      </>}
+    </section></div></>;
 }
 
 function SecuritySettings() {
@@ -3705,10 +3734,14 @@ function SecuritySettings() {
       <PageHead
         eyebrow="HESAP"
         title="Güvenlik ve cihazlar"
-        description="İki aşamalı doğrulama, passkey ve açık oturumlarınızı yönetin."
+        description="Parolanızı, iki aşamalı doğrulamayı, passkey'i ve açık oturumlarınızı yönetin."
       />
-      <ScreenGuide title="Hesabınızı iki basit adımla koruyun." steps={["Önce iki aşamalı doğrulamayı kurun.","Desteklenen cihazlarda hızlı giriş için passkey ekleyin.","Tanımadığınız açık cihaz oturumlarını kapatın."]}/>
+      <ScreenGuide title="Hesabınızı iki basit adımla koruyun." steps={["Yöneticinin verdiği geçici parolayı kendi parolanızla değiştirin.","İki aşamalı doğrulamayı kurun; desteklenen cihazlarda passkey ekleyin.","Tanımadığınız açık cihaz oturumlarını kapatın."]}/>
       {message && <Toast text={message} close={() => setMessage("")} />}
+      <section className="panel security-password">
+        <div><span className="eyebrow">PAROLA</span><h2>Parolamı değiştir</h2><p>Değiştirdiğinizde diğer cihazlardaki oturumlarınız kapatılır; bu cihazda oturumunuz açık kalır.</p></div>
+        <PasswordChangeForm onDone={(text) => { setMessage(text); load(); }} />
+      </section>
       <div className="security-grid">
         <section className="panel security-card">
           <ShieldCheck />
