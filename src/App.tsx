@@ -44,6 +44,7 @@ import {
 import { api } from "./api";
 import { CheckAdvanceForm, CheckAdvanceHistory } from "./CheckAdvances";
 import { CustomerImport } from "./CustomerImport";
+import { OpeningBalanceImport } from "./OpeningBalanceImport";
 import {
   CustomerNoteEditor,
   MachineReport,
@@ -294,9 +295,10 @@ function App() {
               path="/"
               element={guard("DASHBOARD",<Dashboard user={session.currentUser} />)}
             />
-            <Route path="/musteriler" element={guard("CUSTOMERS",<Customers />)} />
+            <Route path="/musteriler" element={guard("CUSTOMERS",<Customers user={session.currentUser} />)} />
             <Route path="/musteriler/yeni" element={guard("CUSTOMERS",<NewCustomer />)} />
             <Route path="/musteriler/ice-aktar" element={guard("CUSTOMERS",<CustomerImport />)} />
+            <Route path="/musteriler/acilis-bakiyesi" element={guard("CUSTOMERS",["ADMIN","ACCOUNTING"].includes(session.currentUser.role)?<OpeningBalanceImport />:<Empty title="Erişim yok" text="Açılış bakiyesi aktarımını yönetici veya muhasebe yapabilir."/>)} />
             <Route path="/musteriler/:id/duzenle" element={guard("CUSTOMERS",<NewCustomer key="edit" />)} />
             <Route path="/musteriler/:id" element={guard("CUSTOMERS",<CustomerDetail user={session.currentUser} />)} />
             <Route
@@ -537,7 +539,7 @@ function PanelTitle({ title, link }: { title: string; link?: string }) {
   );
 }
 
-function Customers() {
+function Customers({ user }: { user: User }) {
   const [items, setItems] = useState<Customer[]>([]);
   const [query, setQuery] = useState("");
   const [unbackedOnly, setUnbackedOnly] = useState(false);
@@ -559,6 +561,12 @@ function Customers() {
         description="Müşteri, bayi ve tedarikçi carileri; bakiye, risk ve iletişim bilgileri."
         action={
           <div className="head-actions">
+            {["ADMIN", "ACCOUNTING"].includes(user.role) && (
+              <NavLink className="mini-btn" to="/musteriler/acilis-bakiyesi">
+                <CircleDollarSign />
+                Açılış bakiyesi aktar
+              </NavLink>
+            )}
             <NavLink className="mini-btn" to="/musteriler/ice-aktar">
               <FileText />
               Excel'den içe aktar
@@ -2865,6 +2873,22 @@ function Instruments({ user }: { user: User }) {
   );
   const [discounts, setDiscounts] = useState<Record<number, Discount>>({});
   const [endorsements,setEndorsements]=useState<Record<number,Endorsement>>({});
+  // Evrak bulma: arama, süzgeçler, sıralama ve görünüm (liste/kart).
+  const [query, setQuery] = useState("");
+  const [customerFilter, setCustomerFilter] = useState("");
+  const [typeFilter, setTypeFilter] = useState("");
+  const [dueFrom, setDueFrom] = useState("");
+  const [dueTo, setDueTo] = useState("");
+  const [sort, setSort] = useState("DUE_ASC");
+  const [view, setView] = useState<"list" | "cards">(() => {
+    try { return localStorage.getItem("celmak.instrumentView") === "cards" ? "cards" : "list"; } catch { return "list"; }
+  });
+  const [focusId, setFocusId] = useState<number | null>(null);
+  const changeView = (next: "list" | "cards") => {
+    setView(next);
+    setFocusId(null);
+    try { localStorage.setItem("celmak.instrumentView", next); } catch { /* tarayıcı depolaması kapalı olabilir */ }
+  };
   const allowed = ["ADMIN", "ACCOUNTING", "AUDITOR"].includes(user.role);
   const load = useCallback(() => {
     if (allowed)
@@ -2971,23 +2995,53 @@ function Instruments({ user }: { user: User }) {
       setMessage(result.message); load();
     } catch(e){setMessage((e as Error).message)}
   };
-  const shown = items.filter(
-    (x) =>
-      filter === "ALL" ||
-      (filter === "ACTION" && !["COLLECTED","CANCELLED","ENDORSED","ASSIGNED"].includes(x.status) && (x.daysToDue<=7 || !x.issuer || !x.serialNumber || (x.instrumentType==="CHECK"&&!x.bankName))) ||
-      (filter === "DUE" &&
-        x.daysToDue === 0 &&
-        !["COLLECTED", "CANCELLED", "ENDORSED", "ASSIGNED"].includes(x.status)) ||
-      (filter === "OVERDUE" &&
-        x.daysToDue < 0 &&
-        !["COLLECTED", "CANCELLED", "ENDORSED", "ASSIGNED"].includes(x.status)) ||
-      (filter === "UPCOMING" &&
-        x.daysToDue > 0 &&
-        !["COLLECTED", "CANCELLED", "ENDORSED", "ASSIGNED"].includes(x.status)) ||
-      (filter === "COLLECTED" && x.status === "COLLECTED") ||
-      (filter === "DISCOUNTED" && !!x.discountCompany) ||
-      (filter === "ENDORSED" && !!x.endorsementCompany),
-  );
+  const closedInstrument = (x: Instrument) => ["COLLECTED", "CANCELLED", "ENDORSED", "ASSIGNED"].includes(x.status);
+  const inTab = (x: Instrument, tab: string) =>
+    tab === "ALL" ||
+    (tab === "ACTION" && !closedInstrument(x) && (x.daysToDue<=7 || !x.issuer || !x.serialNumber || (x.instrumentType==="CHECK"&&!x.bankName))) ||
+    (tab === "DUE" && x.daysToDue === 0 && !closedInstrument(x)) ||
+    (tab === "OVERDUE" && x.daysToDue < 0 && !closedInstrument(x)) ||
+    (tab === "UPCOMING" && x.daysToDue > 0 && !closedInstrument(x)) ||
+    (tab === "COLLECTED" && x.status === "COLLECTED") ||
+    (tab === "DISCOUNTED" && !!x.discountCompany) ||
+    (tab === "ENDORSED" && !!x.endorsementCompany);
+  const words = query.trim().toLocaleLowerCase("tr").split(/\s+/).filter(Boolean);
+  // Her kelime evrakın bir alanında geçmeli. Sayılar tutar ve seri no ile de eşleşir:
+  // "28000", "28.000" ve "28.000,00" aynı çeki bulur.
+  const matchesSearch = (x: Instrument) => {
+    if (!words.length) return true;
+    const haystack = [x.number, x.saleNumber, x.customerName, x.serialNumber, x.issuer, x.bankName, x.currentHolder, x.instrumentType === "CHECK" ? "çek" : "senet", money(x.amount, x.currency)]
+      .filter(Boolean).join(" ").toLocaleLowerCase("tr");
+    const amountDigits = String(Math.round(x.amount));
+    const serialDigits = (x.serialNumber || "").replace(/\D/g, "");
+    return words.every((word) => {
+      if (haystack.includes(word)) return true;
+      if (!/^[\d.,]+$/.test(word)) return false;
+      const whole = word.split(",")[0].replace(/\D/g, "");
+      const exact = Number(word.replace(/\./g, "").replace(",", "."));
+      return (word.includes(",") && Math.abs(exact - x.amount) < 0.005) || (whole.length >= 2 && (amountDigits.includes(whole) || serialDigits.includes(whole)));
+    });
+  };
+  const searching = Boolean(words.length || customerFilter || typeFilter || dueFrom || dueTo);
+  const sorters: Record<string, (a: Instrument, b: Instrument) => number> = {
+    DUE_ASC: (a, b) => a.dueDate.localeCompare(b.dueDate) || a.id - b.id,
+    DUE_DESC: (a, b) => b.dueDate.localeCompare(a.dueDate) || b.id - a.id,
+    AMOUNT_DESC: (a, b) => b.tryAmount - a.tryAmount,
+    CUSTOMER: (a, b) => a.customerName.localeCompare(b.customerName, "tr") || a.dueDate.localeCompare(b.dueDate),
+  };
+  const shown = focusId
+    ? items.filter((x) => x.id === focusId)
+    : (searching ? items : items.filter((x) => inTab(x, filter)))
+        .filter((x) =>
+          (!customerFilter || x.customerName === customerFilter) &&
+          (!typeFilter || x.instrumentType === typeFilter) &&
+          (!dueFrom || x.dueDate >= dueFrom) &&
+          (!dueTo || x.dueDate <= dueTo) &&
+          matchesSearch(x))
+        .sort(sorters[sort]);
+  const customerNames = Array.from(new Set(items.map((x) => x.customerName))).sort((a, b) => a.localeCompare(b, "tr"));
+  const clearFinder = () => { setQuery(""); setCustomerFilter(""); setTypeFilter(""); setDueFrom(""); setDueTo(""); };
+  const openFocused = (id: number) => { setFocusId(id); setOpenId(id); window.scrollTo({ top: 0, behavior: "smooth" }); };
   if (!allowed)
     return (
       <Empty
@@ -3003,6 +3057,41 @@ function Instruments({ user }: { user: User }) {
         description="Çekin teslim alınmasından tahsil, kırdırma veya karşılıksız sonucuna kadar tüm hareketlerini yönetin."
       />
       {message && <Toast text={message} close={() => setMessage("")} />}
+      <section className="panel instrument-finder">
+        <label className="search-input finder-search">
+          <Search />
+          <input value={query} onChange={(e) => { setQuery(e.target.value); setFocusId(null); }} placeholder="Çek ara: cari, evrak no, seri no, banka, keşideci veya tutar (ör. 28.000)" autoComplete="off" aria-label="Çek veya senet ara" />
+          {query && <button type="button" className="finder-clear" aria-label="Aramayı temizle" onClick={() => setQuery("")}><X /></button>}
+        </label>
+        <select aria-label="Cari süzgeci" value={customerFilter} onChange={(e) => { setCustomerFilter(e.target.value); setFocusId(null); }}>
+          <option value="">Tüm cariler</option>
+          {customerNames.map((name) => <option key={name} value={name}>{name}</option>)}
+        </select>
+        <select aria-label="Evrak türü" value={typeFilter} onChange={(e) => { setTypeFilter(e.target.value); setFocusId(null); }}>
+          <option value="">Çek ve senet</option>
+          <option value="CHECK">Yalnız çek</option>
+          <option value="PROMISSORY_NOTE">Yalnız senet</option>
+        </select>
+        <label className="finder-dates"><span>Vade</span><input type="date" aria-label="Vade başlangıcı" value={dueFrom} max={dueTo || undefined} onChange={(e) => { setDueFrom(e.target.value); setFocusId(null); }} /><i>–</i><input type="date" aria-label="Vade bitişi" value={dueTo} min={dueFrom || undefined} onChange={(e) => { setDueTo(e.target.value); setFocusId(null); }} /></label>
+        <select aria-label="Sıralama" value={sort} onChange={(e) => setSort(e.target.value)}>
+          <option value="DUE_ASC">Vadesi en yakın önce</option>
+          <option value="DUE_DESC">Vadesi en uzak önce</option>
+          <option value="AMOUNT_DESC">Tutarı en büyük önce</option>
+          <option value="CUSTOMER">Cari adına göre</option>
+        </select>
+        <div className="view-toggle" role="group" aria-label="Görünüm">
+          <button type="button" className={view === "list" ? "active" : ""} onClick={() => changeView("list")}>Liste</button>
+          <button type="button" className={view === "cards" ? "active" : ""} onClick={() => changeView("cards")}>Kart</button>
+        </div>
+        <div className="finder-summary">
+          {focusId ? (
+            <><b>Seçilen evrak gösteriliyor.</b><button type="button" className="text-btn" onClick={() => { setFocusId(null); setOpenId(null); }}>← Listeye dön</button></>
+          ) : (
+            <>{searching && <span className="finder-scope">Arama bütün evraklarda yapılıyor ·</span>}<b>{shown.length}</b> evrak · {money(shown.reduce((sum, x) => sum + x.tryAmount, 0))}{searching && <button type="button" className="text-btn" onClick={clearFinder}>Süzgeçleri temizle</button>}</>
+          )}
+        </div>
+      </section>
+      {!searching && !focusId && <>
       <section className="instrument-welcome panel"><div><span className="eyebrow">BU EKRANDA NE YAPACAĞIM?</span><h2>Önce çeki bulun, sonra size gösterilen sıradaki adımı uygulayın.</h2><p>Teknik terimleri bilmeniz gerekmez. Kartı açtığınızda yalnızca o çek için yapılabilecek işlemler gösterilir.</p></div><button className="mini-btn" onClick={()=>setHelpOpen(!helpOpen)}>{helpOpen?"Açıklamayı gizle":"Nasıl kullanılır?"}</button></section>
       {helpOpen&&<section className="instrument-simple-flow"><div><i>1</i><span><b>Bilgileri tamamla</b><small>Keşideci, banka ve çek numarasını yazın.</small></span></div><div><i>2</i><span><b>Teslim aldım</b><small>Fiziksel çek elinize geçtiğinde portföye alın.</small></span></div><div><i>3</i><span><b>Sonucu seç</b><small>Tahsil edildi, kırdırıldı veya karşılıksız çıktı.</small></span></div></section>}
       <div className="instrument-stats">
@@ -3049,6 +3138,7 @@ function Instruments({ user }: { user: User }) {
         <div><small>Kırdırmadan bankaya geçen net nakit</small><b>{money(items.reduce((sum,x)=>sum+(x.discountCashAmount||0)*x.exchangeRate,0))}</b><span>Gerçek para girişi</span></div>
         <div><small>Toplam çek finansman maliyeti</small><b>{money(items.reduce((sum,x)=>sum+(x.discountFinanceCost||0)*x.exchangeRate,0))}</b><span>İskonto + komisyon + vergi + masraf</span></div>
       </section>
+      </>}
       <div className="filter-tabs">
         {[
           ["ACTION", "Benim işlem yapacaklarım"],
@@ -3061,14 +3151,40 @@ function Instruments({ user }: { user: User }) {
           ["ALL", "Bütün evraklar"],
         ].map(([v, l]) => (
           <button
-            className={filter === v ? "active" : ""}
-            onClick={() => setFilter(v)}
+            className={filter === v && !searching && !focusId ? "active" : ""}
+            onClick={() => { setFilter(v); clearFinder(); setFocusId(null); }}
             key={v}
           >
-            {l}
+            {l} <em>{items.filter((x) => inTab(x, v)).length}</em>
           </button>
         ))}
       </div>
+      {view === "list" && !focusId ? (
+        <section className="panel">
+          <div className="table-wrap">
+            <table className="instrument-table">
+              <thead><tr><th>Vade</th><th>Cari</th><th>Evrak</th><th>Seri no · banka</th><th className="num">Tutar</th><th>Durum</th><th /></tr></thead>
+              <tbody>
+                {shown.map((x) => {
+                  const incompleteRow = !x.issuer || !x.serialNumber || (x.instrumentType === "CHECK" && !x.bankName);
+                  return (
+                    <tr key={x.id} className={x.daysToDue < 0 && !closedInstrument(x) ? "overdue-row" : ""} onClick={() => openFocused(x.id)}>
+                      <td><b>{dateOnly(x.dueDate)}</b><small className={x.daysToDue < 0 && !closedInstrument(x) ? "danger-text" : ""}>{closedInstrument(x) ? "Kapandı" : x.daysToDue < 0 ? `${Math.abs(x.daysToDue)} gün gecikti` : x.daysToDue === 0 ? "Bugün" : `${x.daysToDue} gün kaldı`}</small></td>
+                      <td><b>{x.customerName}</b><small>{x.saleNumber || "Bağlantı çeki"}</small></td>
+                      <td><b>{x.instrumentType === "CHECK" ? "Çek" : "Senet"}</b><small>{x.number}</small></td>
+                      <td>{incompleteRow ? <span className="import-chip warn">Bilgi eksik</span> : <><b>{x.serialNumber}</b><small>{[x.bankName, x.issuer].filter(Boolean).join(" · ")}</small></>}</td>
+                      <td className="num"><b>{money(x.amount, x.currency)}</b>{x.currency !== "TRY" && <small>{money(x.tryAmount)}</small>}</td>
+                      <td><Status value={x.discountCompany ? "DISCOUNTED" : x.status} /></td>
+                      <td><button type="button" className="mini-btn" onClick={(e) => { e.stopPropagation(); openFocused(x.id); }}>Aç</button></td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          {!shown.length && <EmptyInline text={searching ? "Aramanıza uygun evrak bulunamadı. Yazımı kontrol edin veya süzgeçleri temizleyin." : "Bu sekmede kıymetli evrak bulunmuyor."} />}
+        </section>
+      ) : (
       <div className="instrument-list">
         {shown.map((item) => {
           const detail = details[item.id] || {
@@ -3322,10 +3438,11 @@ function Instruments({ user }: { user: User }) {
         })}
         {!shown.length && (
           <section className="panel">
-            <EmptyInline text="Bu filtrede kıymetli evrak bulunmuyor." />
+            <EmptyInline text={searching ? "Aramanıza uygun evrak bulunamadı. Yazımı kontrol edin veya süzgeçleri temizleyin." : "Bu sekmede kıymetli evrak bulunmuyor."} />
           </section>
         )}
       </div>
+      )}
     </>
   );
 }
@@ -3774,6 +3891,7 @@ function actionLabel(v: string) {
         CUSTOMER_CREATED: "Cari açıldı",
         CUSTOMER_UPDATED: "Cari güncellendi",
         CUSTOMER_DELETED: "Cari silindi",
+        OPENING_BALANCE_POSTED: "Açılış bakiyesi işlendi",
         CUSTOMER_NOTE_UPDATED: "Cari notu güncellendi",
         SALE_RETURN_CREATED: "Sipariş iadesi alındı",
       } as Record<string, string>
@@ -3808,7 +3926,7 @@ function documentTypeLabel(v: string) {
 function paymentTypeLabel(v: string) {
   return ({ ...paymentMethodLabels, CHECK: "Çek" } as Record<string, string>)[v] || v;
 }
-function transactionTypeLabel(v:string){return ({CARD_RECEIPT:"Kredi kartı",SALE_RETURN:"İade",CASH_RECEIPT:"Nakit",BANK_RECEIPT:"Havale / EFT",INSTRUMENT_RECEIPT:"Çek / senet tahsilatı",INSTRUMENT_RECEIVED:"Çek / senet teslim alındı",INSTRUMENT_BOUNCED:"Karşılıksız evrak — borç yeniden açıldı",DOWN_PAYMENT:"Peşinat",RECEIPT_REVERSAL:"Ters kayıt"} as Record<string,string>)[v]||"Tahsilat"}
+function transactionTypeLabel(v:string){return ({OPENING_BALANCE:"Açılış bakiyesi (devir)",CARD_RECEIPT:"Kredi kartı",SALE_RETURN:"İade",CASH_RECEIPT:"Nakit",BANK_RECEIPT:"Havale / EFT",INSTRUMENT_RECEIPT:"Çek / senet tahsilatı",INSTRUMENT_RECEIVED:"Çek / senet teslim alındı",INSTRUMENT_BOUNCED:"Karşılıksız evrak — borç yeniden açıldı",DOWN_PAYMENT:"Peşinat",RECEIPT_REVERSAL:"Ters kayıt"} as Record<string,string>)[v]||"Tahsilat"}
 function dateOnly(value: string) {
   return new Intl.DateTimeFormat("tr-TR", { dateStyle: "medium" }).format(
     new Date(`${value}T12:00:00`),

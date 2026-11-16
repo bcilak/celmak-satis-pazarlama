@@ -722,6 +722,7 @@ app.get("/api/customers", (_req, res) => {
         `SELECT id, code, name, tax_number taxNumber, phone, email, city,
     payment_term_days paymentTermDays, risk_limit riskLimit, balance, code_source codeSource,
     external_system externalSystem, external_id externalId, note, district, address,
+    EXISTS(SELECT 1 FROM account_transactions at WHERE at.customer_id=customers.id AND at.transaction_type='OPENING_BALANCE') hasOpeningBalance,
     (SELECT GROUP_CONCAT(tag) FROM customer_tags ct WHERE ct.customer_id=customers.id) tags FROM customers WHERE active=1 ORDER BY name`,
       )
       .all(),
@@ -917,6 +918,106 @@ app.get("/api/customers/:id", (req, res) => {
     )
     .get(id, id, id, id);
   res.json({ customer, stats, sales, schedules, instruments, shipments });
+});
+
+// Açılış bakiyesi (devir) aktarımı: eski sistemden gelen borç / avans bakiyelerini cariye işler.
+// Tutar > 0 → cari bize borçlu (borç kaydı), tutar < 0 → carinin avansı var (alacak kaydı).
+// Her cariye yalnızca bir açılış bakiyesi girilebilir; sistemde olmayan cariler bu sırada açılır.
+const openingBalanceSchema = z.object({
+  date: z.string().date(),
+  currency: z.enum(["TRY", "USD", "EUR"]).default("TRY"),
+  exchangeRate: z.number().positive().default(1),
+  tags: z.array(z.enum(["CUSTOMER", "SUPPLIER", "DEALER"])).min(1).default(["DEALER"]),
+  paymentTermDays: z.number().int().min(0).max(365).default(30),
+  rows: z
+    .array(
+      z.object({
+        customerId: z.number().int().positive().optional(),
+        name: z.string().trim().min(2).max(180),
+        amount: z.number().refine((v) => Number.isFinite(v) && Math.abs(v) < 1e11, "Tutar geçersiz."),
+        lastDate: z.string().date().optional(),
+        note: z.string().trim().max(500).optional(),
+      }),
+    )
+    .min(1)
+    .max(3000),
+});
+app.post("/api/customers/opening-balances", allow("ADMIN", "ACCOUNTING"), (req, res) => {
+  const parsed = openingBalanceSchema.safeParse(req.body);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    const rowIndex = issue?.path[0] === "rows" && typeof issue.path[1] === "number" ? issue.path[1] + 1 : undefined;
+    return res.status(400).json({ message: rowIndex ? `${rowIndex}. satır geçersiz: ${issue.message}` : "Açılış bakiyesi bilgileri eksik veya geçersiz." });
+  }
+  const input = parsed.data;
+  if (input.currency === "TRY" && input.exchangeRate !== 1) return res.status(400).json({ message: "TL işlemlerde kur 1 olmalıdır." });
+  const activeById = new Map((db.prepare("SELECT id,code,name FROM customers WHERE active=1").all() as { id: number; code: string; name: string }[]).map((c) => [c.id, c]));
+  const activeByName = new Map([...activeById.values()].map((c) => [customerNameKey(c.name), c]));
+  // Aynı cariye düşen satırlar toplanır (ör. dosyada iki satır aynı cariye eşlendiyse).
+  type Group = { customerId?: number; name: string; amount: number; notes: string[]; lastDate?: string; rows: number[] };
+  const groups = new Map<string, Group>();
+  for (const [index, row] of input.rows.entries()) {
+    if (row.customerId && !activeById.has(row.customerId)) return res.status(400).json({ message: `${index + 1}. satırdaki cari bulunamadı veya silinmiş.` });
+    const existing = row.customerId ? activeById.get(row.customerId) : activeByName.get(customerNameKey(row.name));
+    const key = existing ? `id:${existing.id}` : `new:${customerNameKey(row.name)}`;
+    const group = groups.get(key) || { customerId: existing?.id, name: existing?.name || row.name.replace(/\s+/g, " ").trim(), amount: 0, notes: [], rows: [] };
+    group.amount += row.amount;
+    if (row.note) group.notes.push(row.note);
+    if (row.lastDate && (!group.lastDate || row.lastDate > group.lastDate)) group.lastDate = row.lastDate;
+    group.rows.push(index + 1);
+    groups.set(key, group);
+  }
+  const hasOpening = db.prepare("SELECT 1 FROM account_transactions WHERE customer_id=? AND transaction_type='OPENING_BALANCE'");
+  const created: { id: number; code: string; name: string }[] = [];
+  const posted: { id: number; code: string; name: string; amount: number }[] = [];
+  const skipped: { name: string; rows: number[]; reason: string }[] = [];
+  transaction(() => {
+    for (const group of groups.values()) {
+      const amount = Number(group.amount.toFixed(2));
+      let customer = group.customerId ? activeById.get(group.customerId)! : undefined;
+      if (customer && Math.abs(amount) >= 0.01 && hasOpening.get(customer.id)) {
+        skipped.push({ name: customer.name, rows: group.rows, reason: "Bu cariye daha önce açılış bakiyesi girilmiş" });
+        continue;
+      }
+      if (!customer) {
+        const result = insertCustomer(
+          { name: group.name, tags: input.tags, paymentTermDays: input.paymentTermDays, riskLimit: 0, codeSource: "AUTO", note: group.notes.join(" · ").slice(0, 1000) || undefined },
+          req,
+          "OPENING_BALANCE_IMPORT",
+        );
+        customer = { id: result.id, code: result.code, name: group.name };
+        created.push(customer);
+      }
+      if (Math.abs(amount) < 0.01) continue;
+      const tryAmount = Number((Math.abs(amount) * input.exchangeRate).toFixed(2));
+      const details = [group.lastDate ? `son işlem ${group.lastDate.split("-").reverse().join(".")}` : "", ...group.notes].filter(Boolean).join(" · ");
+      postLedger({
+        customerId: customer.id,
+        type: "OPENING_BALANCE",
+        date: input.date,
+        description: `Açılış bakiyesi (devir)${details ? ` · ${details}` : ""}`.slice(0, 300),
+        debit: amount > 0 ? tryAmount : 0,
+        credit: amount < 0 ? tryAmount : 0,
+        currency: input.currency,
+        foreignAmount: Math.abs(amount),
+        rate: input.exchangeRate,
+        sourceType: "OPENING_BALANCE",
+        sourceId: customer.id,
+        actorId: req.user.id,
+      });
+      audit(req.user.id, "OPENING_BALANCE_POSTED", "customer", customer.id, null, { amount, currency: input.currency, exchangeRate: input.exchangeRate, date: input.date, rows: group.rows }, req.ip, req.correlationId);
+      posted.push({ ...customer, amount });
+    }
+  });
+  const debit = posted.filter((p) => p.amount > 0).reduce((sum, p) => sum + p.amount, 0);
+  const credit = posted.filter((p) => p.amount < 0).reduce((sum, p) => sum - p.amount, 0);
+  res.status(posted.length || created.length ? 201 : 200).json({
+    created,
+    posted,
+    skipped,
+    totals: { debit: Number(debit.toFixed(2)), credit: Number(credit.toFixed(2)) },
+    message: `${posted.length} cariye açılış bakiyesi işlendi${created.length ? `, ${created.length} yeni cari açıldı` : ""}${skipped.length ? `, ${skipped.length} cari atlandı` : ""}.`,
+  });
 });
 
 // Cari kartı güncelleme. Cari kodu ve kod kaynağı değişmez (siparişlere/entegrasyonlara bağlı).

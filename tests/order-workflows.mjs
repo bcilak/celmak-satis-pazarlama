@@ -119,6 +119,29 @@ try {
  // Silinen adla yeniden içe aktarma yapılabilir (yeni cari kodu alır).
  const reimported=await request(sales,'/customers/import','POST',{tags:['DEALER'],rows:[{name:'MİRAY TARIM LTD.'}]},201);
  assert.equal(reimported.created.length,1);assert.notEqual(reimported.created[0].code,miray.code);
+ // Açılış bakiyesi (devir): borç ve avans işlenir, yeni cari açılır, aynı cariye ikinci devir girilmez.
+ const balanceTarget=reimported.created[0];
+ await request(sales,'/customers/opening-balances','POST',{date:'2026-01-01',rows:[{name:'X Bayi',amount:100}]},403);
+ const opening=await request(admin,'/customers/opening-balances','POST',{date:'2026-01-01',tags:['DEALER'],rows:[
+  {customerId:balanceTarget.id,name:'MİRAY TARIM LTD.',amount:276000,lastDate:'2022-08-26'},
+  {name:'BEREKET TARIM',amount:-15580225.33,note:'ZAFER GÜNDAY'},
+  {name:'SIFIR BAKİYE BAYİ',amount:0},
+  {name:'bereket  tarım',amount:-100},
+ ]},201);
+ assert.equal(opening.created.length,2,'BEREKET TARIM (iki satır birleşir) ve sıfır bakiyeli bayi açılmalı');
+ assert.equal(opening.posted.length,2);assert.equal(opening.totals.debit,276000);assert.equal(opening.totals.credit,15580325.33);
+ let ledger=await request(admin,`/customers/${balanceTarget.id}/ledger`);
+ assert.equal(ledger.customer.balance,276000);assert.ok(ledger.transactions.some(t=>t.transactionType==='OPENING_BALANCE'&&t.debit===276000&&/son işlem 26\.08\.2022/.test(t.description)));
+ const bereket=(await request(admin,'/customers')).find(c=>c.name==='BEREKET TARIM');
+ assert.equal(bereket.balance,-15580325.33,'Avans eksi bakiye olmalı');assert.equal(bereket.hasOpeningBalance,1);assert.equal(bereket.note,'ZAFER GÜNDAY');assert.equal(bereket.tags,'DEALER');
+ const again=await request(admin,'/customers/opening-balances','POST',{date:'2026-01-01',rows:[{customerId:bereket.id,name:'BEREKET TARIM',amount:-5}]});
+ assert.equal(again.posted.length,0);assert.match(again.skipped[0].reason,/daha önce/);
+ assert.equal((await request(admin,`/customers/${bereket.id}/ledger`)).customer.balance,-15580325.33,'İkinci devir bakiyeyi değiştirmemeli');
+ // Döviz: tutar kurla TL'ye çevrilir; TL'de kur 1 olmalı.
+ await request(admin,'/customers/opening-balances','POST',{date:'2026-01-01',currency:'TRY',exchangeRate:2,rows:[{name:'Kur Test',amount:10}]},400);
+ const eur=await request(admin,'/customers/opening-balances','POST',{date:'2026-01-01',currency:'EUR',exchangeRate:50,rows:[{name:'AGRIBAU SH. P.K.-KOSOVA',amount:30320}]},201);
+ ledger=await request(admin,`/customers/${eur.created[0].id}/ledger`);
+ assert.equal(ledger.customer.balance,1516000);assert.equal(ledger.transactions[0].currency,'EUR');assert.equal(ledger.transactions[0].foreignAmount,30320);
 
  const checksCustomer=await request(sales,'/customers','POST',{name:'Çek Bağlantı Test Cari',riskLimit:5000000},201);
  const checksBalance=async()=> (await request(admin,`/customers/${checksCustomer.id}/ledger`)).customer.balance;
@@ -146,7 +169,7 @@ try {
  assert.equal(history[0].checks[0].status,'COLLECTED');assert.equal(history[0].checks[1].status,'BOUNCED');
  console.log('PASS: eşit olmayan 4 çek, hedef/toplam farkı, grup kaydı, mükerrer/tekrar istek koruması, atomik geri alma, tahsilat ve karşılıksız çek bakiyesi');
  console.log('PASS: parça siparişi, düzenleme, revizyon, onay, 2 milyon avans, makine/parça mahsup, kısmi avans, mükerrer ve yetersiz bakiye kontrolleri');
- console.log('PASS: KDV dahil fiyat, 0/10/20 KDV kısıtı, kredi kartı tahsilatı, iade (sevk/yetki/miktar kontrolleri), makine raporu, cari notu, Excel ile toplu cari, cari düzenleme ve silme');
+ console.log('PASS: KDV dahil fiyat, 0/10/20 KDV kısıtı, kredi kartı tahsilatı, iade (sevk/yetki/miktar kontrolleri), makine raporu, cari notu, Excel ile toplu cari, cari düzenleme ve silme, açılış bakiyesi (devir)');
 } finally {
  server.kill();await new Promise(r=>server.once('exit',r));
  assert.equal(dirname(resolve(dataDir)),resolve(tmpdir()));

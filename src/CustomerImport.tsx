@@ -145,21 +145,21 @@ export function CustomerImport() {
           {result.skipped.length > 0 && (
             <ul className="import-skipped">{result.skipped.map((s) => <li key={s.row}><b>{s.name}</b> — {s.reason}</li>)}</ul>
           )}
-          <div className="head-actions"><NavLink className="primary-btn" to="/musteriler">Carileri gör</NavLink><label className="mini-btn file-pick"><Upload /> Başka dosya yükle<input type="file" accept=".xlsx,.csv" onChange={choose} /></label></div>
+          <div className="head-actions"><NavLink className="primary-btn" to="/musteriler">Carileri gör</NavLink><label className="mini-btn file-pick"><Upload /> Başka dosya yükle<input type="file" accept=".xlsx,.xls,.csv" onChange={choose} /></label></div>
         </section>
       )}
       {!table.length && !result && (
         <section className="panel import-drop">
           <FileSpreadsheet />
-          <h2>Excel (.xlsx) veya CSV dosyası seçin</h2>
-          <p>İlk sayfadaki tablo okunur. Başlık satırında “Bayi / Firma adı”, “İl”, “İlçe”, “Adres”, “Tel” gibi sütunlar otomatik tanınır; gerekirse elle eşleştirebilirsiniz. Eski .xls dosyalarını Excel'de “Farklı kaydet → .xlsx” ile çevirin.</p>
-          <label className="primary-btn file-pick"><Upload /> Dosya seç<input type="file" accept=".xlsx,.csv" onChange={choose} /></label>
+          <h2>Excel (.xlsx, .xls) veya CSV dosyası seçin</h2>
+          <p>İlk sayfadaki tablo okunur. Başlık satırında “Bayi / Firma adı”, “İl”, “İlçe”, “Adres”, “Tel” gibi sütunlar otomatik tanınır; gerekirse elle eşleştirebilirsiniz.</p>
+          <label className="primary-btn file-pick"><Upload /> Dosya seç<input type="file" accept=".xlsx,.xls,.csv" onChange={choose} /></label>
         </section>
       )}
       {table.length > 0 && (
         <>
           <section className="panel import-settings">
-            <div className="import-file"><FileSpreadsheet /><div><b>{fileName}</b><span>{rows.length} dolu satır · başlık {headerRow + 1}. satırda</span></div><label className="mini-btn file-pick"><Upload /> Başka dosya<input type="file" accept=".xlsx,.csv" onChange={choose} /></label></div>
+            <div className="import-file"><FileSpreadsheet /><div><b>{fileName}</b><span>{rows.length} dolu satır · başlık {headerRow + 1}. satırda</span></div><label className="mini-btn file-pick"><Upload /> Başka dosya<input type="file" accept=".xlsx,.xls,.csv" onChange={choose} /></label></div>
             <div className="form-grid">
               <label className="field"><span>Başlık satırı</span><select value={headerRow} onChange={(e) => setHeaderRow(Number(e.target.value))}>{table.slice(0, 15).map((row, i) => <option key={i} value={i}>{i + 1}. satır: {row.filter((c) => clean(c)).slice(0, 3).map(clean).join(" · ") || "(boş)"}</option>)}</select></label>
               <div className="field"><span>Açılacak cari türü</span><div className="tag-picker compact">{["DEALER", "CUSTOMER", "SUPPLIER"].map((tag) => <label key={tag} className={tags.includes(tag) ? "selected" : ""}><input type="checkbox" checked={tags.includes(tag)} onChange={(e) => setTags(e.target.checked ? [...tags, tag] : tags.length > 1 ? tags.filter((t) => t !== tag) : tags)} /><span>{customerTagLabels[tag]}</span></label>)}</div></div>

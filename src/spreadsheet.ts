@@ -1,6 +1,10 @@
-// Küçük, bağımlılıksız .xlsx / .csv okuyucu.
+import { readXls, type Sheet } from "./xls";
+
+export type { Sheet };
+
+// Küçük, bağımlılıksız .xlsx / .xls / .csv okuyucu.
 // .xlsx bir zip arşividir: tarayıcının DecompressionStream'i ile açılır, XML'i DOMParser ile okunur.
-// Yalnızca ilk çalışma sayfasının hücre metinleri döner (biçim, formül, birleştirme yok sayılır).
+// .xls için xls.ts kullanılır. Her sayfanın hücre metinleri döner (biçim, formül, birleştirme yok sayılır).
 
 type ZipEntry = { method: number; compressedSize: number; offset: number };
 
@@ -54,48 +58,60 @@ function columnIndex(reference: string) {
   return n - 1;
 }
 
-async function readXlsx(bytes: Uint8Array): Promise<string[][]> {
+async function readXlsx(bytes: Uint8Array): Promise<Sheet[]> {
   const entries = zipEntries(bytes);
   const read = async (path: string) => {
     const entry = entries.get(path);
     return entry ? entryText(bytes, entry) : undefined;
   };
-  // İlk sayfanın dosya yolunu workbook ilişkilerinden bul.
-  let sheetPath = "xl/worksheets/sheet1.xml";
+  // Sayfa adları, gizlilik durumu ve dosya yolları workbook ve ilişkilerinden okunur.
   const workbook = await read("xl/workbook.xml");
   const rels = await read("xl/_rels/workbook.xml.rels");
-  if (workbook && rels) {
-    const firstSheet = all(xml(workbook), "sheet")[0];
-    const relId = firstSheet?.getAttributeNS("http://schemas.openxmlformats.org/officeDocument/2006/relationships", "id") || firstSheet?.getAttribute("r:id");
-    const target = all(xml(rels), "Relationship").find((r) => r.getAttribute("Id") === relId)?.getAttribute("Target");
-    if (target) sheetPath = target.startsWith("/") ? target.slice(1) : `xl/${target.replace(/^\.\//, "")}`;
-  }
+  const relations = rels ? all(xml(rels), "Relationship") : [];
+  const listed = workbook
+    ? all(xml(workbook), "sheet").map((sheet, index) => {
+        const relId = sheet.getAttributeNS("http://schemas.openxmlformats.org/officeDocument/2006/relationships", "id") || sheet.getAttribute("r:id");
+        const target = relations.find((r) => r.getAttribute("Id") === relId)?.getAttribute("Target");
+        return {
+          name: sheet.getAttribute("name") || `Sayfa${index + 1}`,
+          hidden: ["hidden", "veryHidden"].includes(sheet.getAttribute("state") || ""),
+          path: target ? (target.startsWith("/") ? target.slice(1) : `xl/${target.replace(/^\.\//, "")}`) : `xl/worksheets/sheet${index + 1}.xml`,
+        };
+      })
+    : [{ name: "Sayfa1", hidden: false, path: "xl/worksheets/sheet1.xml" }];
   const shared: string[] = [];
   const sharedText = await read("xl/sharedStrings.xml");
   if (sharedText)
     for (const item of all(xml(sharedText), "si"))
       shared.push(all(item, "t").filter((t) => (t.parentElement?.localName || "") !== "rPh").map((t) => t.textContent || "").join(""));
-  const sheetText = await read(sheetPath);
-  if (!sheetText) throw new Error("Excel dosyasında çalışma sayfası bulunamadı.");
-  const rows: string[][] = [];
-  for (const row of all(xml(sheetText), "row")) {
-    const rowIndex = Number(row.getAttribute("r")) - 1 || rows.length;
-    const cells: string[] = [];
-    for (const cell of all(row, "c")) {
-      const ref = cell.getAttribute("r");
-      const column = ref ? columnIndex(ref) : cells.length;
-      const type = cell.getAttribute("t");
-      const raw = all(cell, "v")[0]?.textContent ?? "";
-      let value = raw;
-      if (type === "s") value = shared[Number(raw)] ?? "";
-      else if (type === "inlineStr") value = all(cell, "t").map((t) => t.textContent || "").join("");
-      else if (type === "b") value = raw === "1" ? "DOĞRU" : "YANLIŞ";
-      else if (type === "e") value = "";
-      cells[column] = value;
+  const sheets: Sheet[] = [];
+  for (const entry of listed) {
+    const sheetText = await read(entry.path);
+    if (!sheetText) continue;
+    const rows: string[][] = [];
+    const hiddenRows: number[] = [];
+    for (const row of all(xml(sheetText), "row")) {
+      const rowIndex = Number(row.getAttribute("r")) - 1 || rows.length;
+      if (["1", "true"].includes(row.getAttribute("hidden") || "")) hiddenRows.push(rowIndex);
+      const cells: string[] = [];
+      for (const cell of all(row, "c")) {
+        const ref = cell.getAttribute("r");
+        const column = ref ? columnIndex(ref) : cells.length;
+        const type = cell.getAttribute("t");
+        const raw = all(cell, "v")[0]?.textContent ?? "";
+        let value = raw;
+        if (type === "s") value = shared[Number(raw)] ?? "";
+        else if (type === "inlineStr") value = all(cell, "t").map((t) => t.textContent || "").join("");
+        else if (type === "b") value = raw === "1" ? "DOĞRU" : "YANLIŞ";
+        else if (type === "e") value = "";
+        cells[column] = value;
+      }
+      rows[rowIndex] = Array.from(cells, (value) => value ?? "");
     }
-    rows[rowIndex] = Array.from(cells, (value) => value ?? "");
+    sheets.push({ name: entry.name, hidden: entry.hidden, rows: Array.from(rows, (row) => row ?? []), hiddenRows });
   }
-  return Array.from(rows, (row) => row ?? []);
+  if (!sheets.length) throw new Error("Excel dosyasında çalışma sayfası bulunamadı.");
+  return sheets;
 }
 
 function readCsv(text: string): string[][] {
@@ -122,8 +138,8 @@ function readCsv(text: string): string[][] {
   return rows;
 }
 
-/** Excel (.xlsx) veya CSV dosyasının ilk sayfasını hücre metinleri olarak döndürür. */
-export async function readSpreadsheet(file: File): Promise<string[][]> {
+/** Excel (.xlsx / .xls) veya CSV dosyasının bütün sayfalarını hücre metinleri olarak döndürür. */
+export async function readWorkbook(file: File): Promise<Sheet[]> {
   const bytes = new Uint8Array(await file.arrayBuffer());
   const name = file.name.toLocaleLowerCase("tr-TR");
   if (name.endsWith(".csv")) {
@@ -131,8 +147,24 @@ export async function readSpreadsheet(file: File): Promise<string[][]> {
     // Excel'in Türkçe CSV çıktısı çoğunlukla Windows-1254'tür.
     const invalidUtf8 = utf8.includes(String.fromCharCode(0xfffd));
     const withoutBom = utf8.charCodeAt(0) === 0xfeff ? utf8.slice(1) : utf8;
-    return readCsv(invalidUtf8 ? new TextDecoder("windows-1254").decode(bytes) : withoutBom);
+    return [{ name: "CSV", hidden: false, rows: readCsv(invalidUtf8 ? new TextDecoder("windows-1254").decode(bytes) : withoutBom), hiddenRows: [] }];
   }
-  if (name.endsWith(".xls")) throw new Error("Eski .xls biçimi desteklenmiyor. Excel'de “Farklı kaydet → Excel Çalışma Kitabı (.xlsx)” ile kaydedip tekrar deneyin.");
-  return readXlsx(bytes);
+  // Uzantıya değil içeriğe bakılır: .xls (OLE2) ile .xlsx (zip) imzaları farklıdır.
+  if (bytes[0] === 0xd0 && bytes[1] === 0xcf && bytes[2] === 0x11 && bytes[3] === 0xe0) return readXls(bytes);
+  if (bytes[0] === 0x50 && bytes[1] === 0x4b) return readXlsx(bytes);
+  throw new Error("Dosya biçimi tanınmadı. Excel (.xlsx, .xls) veya CSV dosyası seçin.");
+}
+
+const hasData = (sheet: Sheet) => sheet.rows.some((row) => row.some((cell) => cell.trim()));
+
+/** Kullanıcıya varsayılan olarak gösterilecek sayfa: ilk görünür ve dolu sayfa. */
+export const defaultSheetIndex = (sheets: Sheet[]) => {
+  const index = sheets.findIndex((sheet) => !sheet.hidden && hasData(sheet));
+  return index >= 0 ? index : Math.max(0, sheets.findIndex(hasData));
+};
+
+/** Geriye dönük uyumluluk: varsayılan sayfanın hücreleri. */
+export async function readSpreadsheet(file: File): Promise<string[][]> {
+  const sheets = await readWorkbook(file);
+  return sheets[defaultSheetIndex(sheets)]?.rows ?? [];
 }

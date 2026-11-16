@@ -17,6 +17,8 @@ export type Customer = {
   note?: string | null;
   district?: string | null;
   address?: string | null;
+  /** Bu cariye açılış bakiyesi (devir) girilmiş mi (1/0). */
+  hasOpeningBalance?: number;
 };
 /** Cari türü etiketleri. DB anahtarı (CUSTOMER) korunur; görünen ad fabrikadaki terimdir. */
 export const customerTagLabels: Record<string, string> = {
