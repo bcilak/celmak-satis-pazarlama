@@ -321,3 +321,33 @@
 .user-form .form-grid{align-items:start}
 .user-form .password-field{grid-column:1/-1}
 .password-input input{min-width:120px}
+
+/* ---- Sipariş revizyonu ---- */
+.sale-amend{margin-top:16px}
+.amend-form{padding:0 20px 20px;display:grid;gap:14px}
+.amend-form .info-note{margin:0}
+.amend-table td{vertical-align:middle}
+.amend-table .num{text-align:right;font-variant-numeric:tabular-nums}
+.amend-table select{border:1px solid #ccd6d2;border-radius:8px;padding:8px;background:#fff}
+.amend-table .money-input{min-width:150px}
+.changed-row td{background:#fffaf0}
+.amend-add{display:grid;gap:6px;max-width:520px}
+.amend-add .search-input{width:auto;border:1px solid #ccd6d2;background:#fff}
+.amend-hits{display:grid;gap:4px}
+.amend-hits button{display:flex;flex-direction:column;align-items:flex-start;text-align:left;border:1px solid var(--line);background:#fff;border-radius:8px;padding:8px 10px;cursor:pointer}
+.amend-hits button:hover{background:#f2f8f6;border-color:#7ca99c}
+.amend-hits small{font-size:11px;color:var(--muted)}
+.amend-summary{display:flex;flex-wrap:wrap;gap:12px}
+.amend-summary>div{display:grid;gap:2px;border:1px solid var(--line);border-radius:10px;padding:10px 14px;min-width:160px;background:#fff}
+.amend-summary small{font-size:11px;color:var(--muted)}
+.amend-summary b{font:800 18px Manrope}
+.amend-summary span{font-size:11px;color:#4d5b56}
+.diff-up b,strong.diff-up{color:#a33e37}
+.diff-down b,strong.diff-down{color:#167052}
+.amend-summary .diff-up{border-color:#efc3bf;background:#fff8f7}
+.amend-summary .diff-down{border-color:#b9dfd1;background:#f4fbf8}
+.amend-settlement{display:grid;gap:8px;border:1px solid #f2c48f;background:#fffaf3;border-radius:10px;padding:12px 14px}
+.amend-settlement .field{max-width:220px}
+.amend-history small{display:block}
+.amend-table td:first-child{min-width:220px}
+.amend-table .money-input{min-width:130px}

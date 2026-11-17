@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState, type ChangeEvent, type FormEvent, type ReactNode } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, ChartColumn, Pencil, Printer, StickyNote, TriangleAlert, Undo2 } from "lucide-react";
+import { ArrowLeft, ChartColumn, PencilLine, Pencil, Plus, Printer, StickyNote, TriangleAlert, Undo2, X } from "lucide-react";
 import { api } from "./api";
-import { currencySymbol, money, paymentMethodLabels, statusLabels } from "./types";
+import { VAT_RATES, currencySymbol, money, paymentMethodLabels, statusLabels, type Product } from "./types";
 
 /* ------------------------------------------------------------------ */
 /* Ortak yardımcılar                                                   */
@@ -224,16 +224,17 @@ function DocHeader({ title, number, date, extra }: { title: string; number: stri
 
 type SaleDoc = {
   sale: {
-    id: number; number: string; status: string; note?: string; paymentMethod: string; cardInstallments?: number | null;
+    id: number; number: string; status: string; note?: string; paymentMethod: string; cardInstallments?: number | null; orderKind?: "MACHINE" | "SPARE_PART";
     subtotal: number; vatTotal: number; grandTotal: number; downPayment: number; advanceAmount: number;
     currency: string; exchangeRate: number; createdAt: string; orderDate?: string; approvedAt?: string | null;
     customerId: number; customerCode: string; customerName: string; customerTaxNumber?: string; customerPhone?: string; customerEmail?: string; customerCity?: string;
     createdBy: string; approvalAssignee?: string;
   };
-  items: { id: number; code: string; name: string; unit: string; model?: string; productGroup?: string; quantity: number; unitPrice: number; vatRate: number; lineTotal: number; shippedQuantity: number; returnedQuantity: number }[];
+  items: { id: number; productId: number; code: string; name: string; unit: string; model?: string; productGroup?: string; quantity: number; unitPrice: number; vatRate: number; lineTotal: number; shippedQuantity: number; returnedQuantity: number }[];
   schedule: { sequenceNo: number; paymentType: string; dueDate: string; amount: number; paidAmount: number; currency: string; status: string }[];
   shipments: { id: number; number: string; status: string; plannedDate: string; actualDate?: string; dispatchNumber?: string }[];
   returns: { id: number; number: string; returnDate: string; reason: string; subtotal: number; vatTotal: number; grandTotal: number; currency: string; createdBy: string; items: { quantity: number; lineTotal: number; name: string; code: string; unit: string }[] }[];
+  amendments?: { id: number; number: string; amendmentDate: string; reason: string; previousTotal: number; newTotal: number; difference: number; currency: string; settlement: string; settlementDueDate?: string | null; createdBy: string; changes: { product: string; oldQuantity: number; newQuantity: number; oldTotal: number; newTotal: number }[] }[];
 };
 export type { SaleDoc };
 
@@ -302,6 +303,7 @@ export function SalePrint() {
             <p>{s.paymentMethod === "CREDIT_CARD" ? "Kredi kartı ile tahsil edilecek." : s.paymentMethod === "CASH" ? "Peşin tahsil edilecek." : "Ödeme planı yok."}</p>
           )}
           {s.note && <p className="doc-note"><b>Not:</b> {s.note}</p>}
+          {data.amendments?.length ? <p className="doc-note"><b>Revize edildi:</b> {data.amendments.map((a) => `${a.number} (${longDate(a.amendmentDate)})`).join(", ")}. Tablo güncel kalemleri gösterir.</p> : null}
         </div>
         <div className="doc-totals">
           <p><span>Ara toplam (KDV hariç)</span><b>{money(s.subtotal, s.currency)}</b></p>
@@ -655,6 +657,176 @@ export function SaleReturnPanel({ data, canReturn, onDone }: { data: SaleDoc; ca
                 <small>{r.items.map((item) => `${qty(item.quantity)} ${item.unit} ${item.name}`).join(", ")} — {r.reason}</small>
               </span>
               <strong>{money(r.grandTotal, r.currency)}<small>{r.createdBy}</small></strong>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Onaylı sipariş revizyonu                                            */
+/* ------------------------------------------------------------------ */
+
+const settlementLabels: Record<string, string> = {
+  OPEN_ACCOUNT: "Açık cari (Tahsilatlar'dan alınacak)",
+  BANK_TRANSFER: "Vadeli havale / EFT",
+  CHECK: "Çek",
+  PROMISSORY_NOTE: "Senet",
+  NONE: "—",
+};
+const addDays = (iso: string, days: number) => {
+  const d = new Date(`${iso}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+};
+
+type AmendLine = { key: string; saleItemId?: number; productId: number; name: string; detail: string; quantity: number; unitPrice: number; vatRate: number; shipped: number; returned: number; original?: { quantity: number; lineTotal: number } };
+
+export function SaleAmendPanel({ data, canAmend, onDone }: { data: SaleDoc; canAmend: boolean; onDone: (message: string) => void }) {
+  const s = data.sale;
+  const approved = ["APPROVED", "COMPLETED"].includes(s.status);
+  const [open, setOpen] = useState(false);
+  const [lines, setLines] = useState<AmendLine[]>([]);
+  const [products, setProducts] = useState<Product[]>([]);
+  const [search, setSearch] = useState("");
+  const [reason, setReason] = useState("");
+  const [date, setDate] = useState(todayIso());
+  const [settlement, setSettlement] = useState("OPEN_ACCOUNT");
+  const [dueDate, setDueDate] = useState(addDays(todayIso(), 30));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const amendments = data.amendments || [];
+
+  const start = () => {
+    setLines(data.items.map((item) => ({
+      key: `item-${item.id}`, saleItemId: item.id, productId: item.productId, name: item.name, detail: [item.model, item.code].filter(Boolean).join(" · "),
+      quantity: item.quantity, unitPrice: Number((item.lineTotal / item.quantity).toFixed(2)), vatRate: item.vatRate,
+      shipped: item.shippedQuantity, returned: item.returnedQuantity, original: { quantity: item.quantity, lineTotal: item.lineTotal },
+    })));
+    setReason(""); setError(""); setSearch(""); setSettlement("OPEN_ACCOUNT"); setDate(todayIso()); setDueDate(addDays(todayIso(), 30));
+    setOpen(true);
+    if (!products.length) api<Product[]>("/products").then(setProducts).catch((e) => setError(e.message));
+  };
+
+  const lineTotal = (l: AmendLine) => Number((l.unitPrice * l.quantity).toFixed(2));
+  const newTotal = Number(lines.reduce((sum, l) => sum + lineTotal(l), 0).toFixed(2));
+  const difference = Number((newTotal - s.grandTotal).toFixed(2));
+  const changed = lines.some((l) => !l.original || l.quantity !== l.original.quantity || Math.abs(lineTotal(l) - l.original.lineTotal) >= 0.01);
+  const invalid = lines.find((l) => l.quantity < l.shipped || (l.quantity > 0 && l.unitPrice <= 0));
+  const kindOk = (p: Product) => (s.orderKind === "SPARE_PART" ? p.partCategory !== "MACHINE" : p.partCategory === "MACHINE");
+  const words = search.trim().toLocaleLowerCase("tr-TR").split(/\s+/).filter(Boolean);
+  const hits = words.length
+    ? products.filter((p) => kindOk(p) && !lines.some((l) => l.productId === p.id) && words.every((w) => `${p.name} ${p.code} ${p.manufacturerModel || ""} ${p.productGroup || ""}`.toLocaleLowerCase("tr-TR").includes(w))).slice(0, 8)
+    : [];
+  const addProduct = (p: Product) => {
+    const vat = (VAT_RATES as readonly number[]).includes(p.vatRate) ? p.vatRate : 20;
+    const net = s.currency === "TRY" ? p.unitPrice : p.unitPrice / s.exchangeRate;
+    setLines((cur) => [...cur, { key: `new-${p.id}`, productId: p.id, name: p.name, detail: [p.manufacturerModel, p.productGroup].filter(Boolean).join(" · ") || p.code, quantity: 1, unitPrice: p.manualPrice ? 0 : Number((net * (1 + vat / 100)).toFixed(2)), vatRate: vat, shipped: 0, returned: 0 }]);
+    setSearch("");
+  };
+  const patch = (key: string, change: Partial<AmendLine>) => setLines((cur) => cur.map((l) => (l.key === key ? { ...l, ...change } : l)));
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api<{ message: string }>(`/sales/${s.id}/amendments`, {
+        method: "POST",
+        body: JSON.stringify({
+          amendmentDate: date, reason,
+          items: lines.filter((l) => l.saleItemId || l.quantity > 0).map((l) => ({ saleItemId: l.saleItemId, productId: l.productId, quantity: l.quantity, unitPrice: l.unitPrice, vatRate: l.vatRate })),
+          settlement: difference > 0 ? settlement : "OPEN_ACCOUNT",
+          settlementDueDate: difference > 0 && settlement !== "OPEN_ACCOUNT" ? dueDate : undefined,
+        }),
+      });
+      setOpen(false);
+      onDone(result.message);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!approved && !amendments.length) return null;
+  return (
+    <section className="panel sale-amend">
+      <div className="panel-title">
+        <h2>Sipariş revizyonları</h2>
+        {canAmend && approved && !open && <button type="button" className="mini-btn" onClick={start}><PencilLine /> Siparişi revize et</button>}
+      </div>
+      {open && (
+        <form className="amend-form" onSubmit={submit}>
+          <p className="info-note">Miktar ve fiyatları değiştirin, ürün ekleyin veya çıkarın. Fiyatlar KDV dahildir. Sevk edilmiş miktarın altına inilemez (azaltmak için iade kullanın). Kaydedince fark cariye işlenir ve revizyon geçmişe yazılır.</p>
+          <div className="table-wrap">
+            <table className="amend-table">
+              <thead><tr><th>Ürün</th><th className="num">Sevk edilen</th><th>Miktar</th><th>Birim fiyat (KDV dahil)</th><th>KDV</th><th className="num">Tutar</th><th /></tr></thead>
+              <tbody>
+                {lines.map((l) => {
+                  const removed = l.quantity === 0;
+                  const changedLine = !l.original || l.quantity !== l.original.quantity || Math.abs(lineTotal(l) - l.original.lineTotal) >= 0.01;
+                  return (
+                    <tr key={l.key} className={removed ? "muted-row" : changedLine ? "changed-row" : ""}>
+                      <td><b>{l.name}</b><small>{l.detail}{!l.original ? " · yeni kalem" : l.original.quantity !== l.quantity ? ` · önce ${qty(l.original.quantity)}` : ""}</small></td>
+                      <td className="num">{l.original ? qty(l.shipped) : "—"}</td>
+                      <td><input className="qty-input" type="number" min={l.shipped} step="1" value={l.quantity} onChange={(e) => patch(l.key, { quantity: Math.max(0, Number(e.target.value)) })} aria-label={`${l.name} miktarı`} />{l.quantity < l.shipped && <small className="danger-text">En az {qty(l.shipped)}</small>}</td>
+                      <td><MoneyInput currency={s.currency} value={l.unitPrice} invalid={l.quantity > 0 && l.unitPrice <= 0} onChange={(v) => patch(l.key, { unitPrice: v })} /></td>
+                      <td><select value={l.vatRate} onChange={(e) => patch(l.key, { vatRate: Number(e.target.value) })}>{VAT_RATES.map((r) => <option key={r} value={r}>%{r}</option>)}</select></td>
+                      <td className="num"><b>{money(lineTotal(l), s.currency)}</b></td>
+                      <td>{l.original ? <button type="button" className="mini-btn" disabled={l.shipped > 0 || l.returned > 0 || removed} title={l.shipped > 0 ? "Sevk edilmiş kalem çıkarılamaz" : "Kalemi çıkar"} onClick={() => patch(l.key, { quantity: 0 })}><X /></button> : <button type="button" className="mini-btn" title="Kalemi kaldır" onClick={() => setLines((cur) => cur.filter((x) => x.key !== l.key))}><X /></button>}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <div className="amend-add">
+            <label className="search-input"><Plus /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder={s.orderKind === "SPARE_PART" ? "Parça ekle: kod veya ad yazın" : "Ürün ekle: model veya ad yazın (ör. silaj)"} /></label>
+            {hits.length > 0 && <div className="amend-hits">{hits.map((p) => <button type="button" key={p.id} onClick={() => addProduct(p)}><b>{p.name}</b><small>{[p.manufacturerModel, p.productGroup, p.code].filter(Boolean).join(" · ")}</small></button>)}</div>}
+            {words.length > 0 && !hits.length && <small className="muted-note">Eşleşen ürün yok.</small>}
+          </div>
+          <div className="amend-summary">
+            <div><small>Önceki toplam</small><b>{money(s.grandTotal, s.currency)}</b></div>
+            <div><small>Yeni toplam</small><b>{money(newTotal, s.currency)}</b></div>
+            <div className={difference > 0.009 ? "diff-up" : difference < -0.009 ? "diff-down" : ""}>
+              <small>Fark</small>
+              <b>{difference > 0 ? "+" : difference < 0 ? "−" : ""}{money(Math.abs(difference), s.currency)}</b>
+              <span>{difference > 0.009 ? "Bayiden alınacak ek tutar (cariye borç)" : difference < -0.009 ? "Bayiye alacak / avans olarak işlenir" : "Tutar değişmiyor"}</span>
+            </div>
+          </div>
+          {difference > 0.009 && (
+            <div className="amend-settlement">
+              <b>Fark nasıl ödenecek?</b>
+              <div className="chip-filters">{["OPEN_ACCOUNT", "BANK_TRANSFER", "CHECK", "PROMISSORY_NOTE"].map((v) => <button type="button" key={v} className={settlement === v ? "active" : ""} onClick={() => setSettlement(v)}>{settlementLabels[v]}</button>)}</div>
+              {settlement !== "OPEN_ACCOUNT" && <label className="field"><span>Vade tarihi</span><input type="date" required value={dueDate} onChange={(e) => setDueDate(e.target.value)} /></label>}
+              <small className="muted-note">{settlement === "OPEN_ACCOUNT" ? "Fark cari bakiyeye eklenir; ödeme gelince Tahsilatlar ekranından girilir." : settlement === "BANK_TRANSFER" ? "Ödeme planına vadeli havale satırı eklenir." : "Ödeme planına eklenir ve Çek ve Senetler ekranında planlı evrak oluşur."}</small>
+            </div>
+          )}
+          <div className="form-grid">
+            <label className="field"><span>Revizyon tarihi</span><input type="date" required max={todayIso()} value={date} onChange={(e) => setDate(e.target.value)} /></label>
+            <label className="field wide"><span>Revizyon nedeni</span><input required minLength={3} maxLength={500} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Örn. Bayi 10 tamburlu yerine 8 tamburlu + 2 silaj istedi" /></label>
+          </div>
+          {error && <div className="error-box">{error}</div>}
+          <div className="head-actions">
+            <button type="button" className="mini-btn" onClick={() => setOpen(false)} disabled={busy}>Vazgeç</button>
+            <button className="primary-btn" disabled={busy || !changed || Boolean(invalid) || reason.trim().length < 3 || !lines.some((l) => l.quantity > 0)}>{busy ? "Kaydediliyor…" : "Revizyonu kaydet"}</button>
+          </div>
+        </form>
+      )}
+      {!open && !amendments.length && <p className="info-note pad">Bu sipariş henüz revize edilmedi.{canAmend ? " Bayi kalem veya fiyat değişikliği isterse “Siparişi revize et” ile güncelleyin; fark cariye otomatik işlenir." : ""}</p>}
+      {amendments.length > 0 && (
+        <div className="compact-list amend-history">
+          {amendments.map((a) => (
+            <div key={a.id}>
+              <span>
+                <b>{a.number} · {longDate(a.amendmentDate)} · {a.createdBy}</b>
+                <small>{a.reason}</small>
+                <small>{a.changes.map((c) => c.oldQuantity === 0 ? `+ ${qty(c.newQuantity)} ${c.product}` : c.newQuantity === 0 ? `− ${c.product} çıkarıldı` : c.oldQuantity !== c.newQuantity ? `${c.product}: ${qty(c.oldQuantity)} → ${qty(c.newQuantity)}` : `${c.product}: fiyat ${money(c.oldTotal, a.currency)} → ${money(c.newTotal, a.currency)}`).join(" · ")}</small>
+              </span>
+              <strong className={a.difference > 0 ? "diff-up" : a.difference < 0 ? "diff-down" : ""}>{a.difference > 0 ? "+" : a.difference < 0 ? "−" : ""}{money(Math.abs(a.difference), a.currency)}<small>{a.difference > 0 ? settlementLabels[a.settlement] + (a.settlementDueDate ? ` · ${longDate(a.settlementDueDate)}` : "") : `${money(a.previousTotal, a.currency)} → ${money(a.newTotal, a.currency)}`}</small></strong>
             </div>
           ))}
         </div>

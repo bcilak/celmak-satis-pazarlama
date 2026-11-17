@@ -50,6 +50,7 @@ import {
   CustomerNoteEditor,
   MachineReport,
   MoneyInput,
+  SaleAmendPanel,
   SalePrint,
   SaleReturnPanel,
   ShipmentPrint,
@@ -1280,6 +1281,7 @@ function SaleDetail({user}:{user:User}){
     {message&&<Toast text={message} close={()=>setMessage("")}/>}
     <div className="sale-detail-grid"><section className="panel"><PanelTitle title="Satılan ürünler"/><div className="table-wrap"><table><thead><tr><th>Ürün</th><th>Miktar</th><th>Birim fiyat (KDV dahil)</th><th>KDV</th><th>Satır toplamı</th></tr></thead><tbody>{data.items.map(x=><tr key={x.id}><td><b>{x.name}</b><small>{[x.model,x.code].filter(Boolean).join(" · ")}</small></td><td>{x.quantity} {x.unit}{x.shippedQuantity>0&&<small>{x.shippedQuantity} sevk edildi{x.returnedQuantity>0?` · ${x.returnedQuantity} iade`:""}</small>}</td><td>{money(x.lineTotal/x.quantity,s.currency)}</td><td>%{x.vatRate}</td><td className="amount">{money(x.lineTotal,s.currency)}</td></tr>)}</tbody></table></div></section><aside className="panel sale-financial-summary"><PanelTitle title="Finansal özet"/><p><span>Ara toplam (KDV hariç)</span><b>{money(s.subtotal,s.currency)}</b></p><p><span>KDV</span><b>{money(s.vatTotal,s.currency)}</b></p><p className="grand"><span>Genel toplam</span><b>{money(s.grandTotal,s.currency)}</b></p><p><span>Yeni peşinat</span><b>{money(s.downPayment,s.currency)}</b></p><p><span>Cari avansından mahsup</span><b>{money(s.advanceAmount,s.currency)}</b></p>{data.returns.length>0&&<p><span>İade edilen</span><b>− {money(data.returns.reduce((sum,r)=>sum+r.grandTotal,0),s.currency)}</b></p>}<p><span>Sipariş notu</span><b>{s.note||"—"}</b></p><p><span>Ödeme şekli</span><b>{method}</b></p><p><span>Onay yetkilisi</span><b>{s.approvalAssignee||"Belirlenmedi"}</b></p><Status value={s.status}/></aside></div>
     <section className="panel sale-schedule"><PanelTitle title="Ödeme ve vade planı"/>{data.schedule.length?<div className="compact-list">{data.schedule.map(x=><div key={x.sequenceNo}><span><b>{x.sequenceNo===0?"Peşinat":`${x.sequenceNo}. ödeme`} · {paymentTypeLabel(x.paymentType)}</b><small>{dateOnly(x.dueDate)}</small></span><strong>{money(x.amount,x.currency)}<small>{x.paidAmount?`${money(x.paidAmount,x.currency)} ödendi`:"Ödeme bekleniyor"}</small></strong><Status value={x.status}/></div>)}</div>:<p className="info-note pad">{s.paymentMethod==="CREDIT_CARD"?"Kredi kartıyla tahsil edilir; vade planı oluşmaz.":s.paymentMethod==="CASH"?"Peşin tahsil edilir; vade planı oluşmaz.":"Vade planı yok."}</p>}</section>
+    <SaleAmendPanel data={data} canAmend={user.role==="ADMIN"} onDone={(text)=>{setMessage(text);load();}}/>
     <SaleReturnPanel data={data} canReturn={user.role==="ADMIN"} onDone={(text)=>{setMessage(text);load();}}/>
   </>;
 }
@@ -3954,6 +3956,7 @@ function actionLabel(v: string) {
         CUSTOMER_UPDATED: "Cari güncellendi",
         CUSTOMER_DELETED: "Cari silindi",
         OPENING_BALANCE_POSTED: "Açılış bakiyesi işlendi",
+        SALE_AMENDED: "Sipariş revize edildi",
         CUSTOMER_NOTE_UPDATED: "Cari notu güncellendi",
         SALE_RETURN_CREATED: "Sipariş iadesi alındı",
       } as Record<string, string>
@@ -3988,7 +3991,7 @@ function documentTypeLabel(v: string) {
 function paymentTypeLabel(v: string) {
   return ({ ...paymentMethodLabels, CHECK: "Çek" } as Record<string, string>)[v] || v;
 }
-function transactionTypeLabel(v:string){return ({OPENING_BALANCE:"Açılış bakiyesi (devir)",CARD_RECEIPT:"Kredi kartı",SALE_RETURN:"İade",CASH_RECEIPT:"Nakit",BANK_RECEIPT:"Havale / EFT",INSTRUMENT_RECEIPT:"Çek / senet tahsilatı",INSTRUMENT_RECEIVED:"Çek / senet teslim alındı",INSTRUMENT_BOUNCED:"Karşılıksız evrak — borç yeniden açıldı",DOWN_PAYMENT:"Peşinat",RECEIPT_REVERSAL:"Ters kayıt"} as Record<string,string>)[v]||"Tahsilat"}
+function transactionTypeLabel(v:string){return ({SALE_AMENDMENT:"Sipariş revizyonu",OPENING_BALANCE:"Açılış bakiyesi (devir)",CARD_RECEIPT:"Kredi kartı",SALE_RETURN:"İade",CASH_RECEIPT:"Nakit",BANK_RECEIPT:"Havale / EFT",INSTRUMENT_RECEIPT:"Çek / senet tahsilatı",INSTRUMENT_RECEIVED:"Çek / senet teslim alındı",INSTRUMENT_BOUNCED:"Karşılıksız evrak — borç yeniden açıldı",DOWN_PAYMENT:"Peşinat",RECEIPT_REVERSAL:"Ters kayıt"} as Record<string,string>)[v]||"Tahsilat"}
 function dateOnly(value: string) {
   return new Intl.DateTimeFormat("tr-TR", { dateStyle: "medium" }).format(
     new Date(`${value}T12:00:00`),

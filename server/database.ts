@@ -460,6 +460,25 @@ export function migrate() {
   addColumn('sales', 'order_date', 'TEXT')
   db.exec("UPDATE sales SET order_date=date(created_at) WHERE order_date IS NULL")
 
+  // Onaylı sipariş revizyonları: kalem/fiyat değişikliği ve fark tutarının cariye işlenmesi.
+  db.exec(`CREATE TABLE IF NOT EXISTS sale_amendments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    number TEXT UNIQUE,
+    sale_id INTEGER NOT NULL REFERENCES sales(id),
+    amendment_date TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    previous_total REAL NOT NULL,
+    new_total REAL NOT NULL,
+    difference REAL NOT NULL,
+    currency TEXT NOT NULL,
+    exchange_rate REAL NOT NULL,
+    settlement TEXT NOT NULL,
+    settlement_due_date TEXT,
+    changes_json TEXT NOT NULL,
+    created_by INTEGER NOT NULL REFERENCES users(id),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`)
+
   // Sipariş iadeleri: sevk edilmiş ürünlerin geri alınması ve cariye alacak kaydı.
   db.exec(`CREATE TABLE IF NOT EXISTS sale_returns (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

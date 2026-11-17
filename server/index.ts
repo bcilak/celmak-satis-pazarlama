@@ -1615,7 +1615,119 @@ app.get("/api/sales/:id/detail", (req,res)=>{
   const shipments=db.prepare(`SELECT id,number,status,planned_date plannedDate,actual_date actualDate,dispatch_number dispatchNumber FROM shipments WHERE sale_id=? ORDER BY id DESC`).all(id);
   const returns=(db.prepare(`SELECT r.id,r.number,r.return_date returnDate,r.reason,r.subtotal,r.vat_total vatTotal,r.grand_total grandTotal,r.currency,u.name createdBy FROM sale_returns r JOIN users u ON u.id=r.created_by WHERE r.sale_id=? ORDER BY r.id DESC`).all(id) as {id:number}[])
     .map(r=>({...r,items:db.prepare(`SELECT ri.quantity,ri.line_total lineTotal,p.name,p.code,p.unit FROM sale_return_items ri JOIN products p ON p.id=ri.product_id WHERE ri.return_id=?`).all(r.id)}));
-  res.json({sale,items,schedule,shipments,returns});
+  const amendments=(db.prepare(`SELECT a.id,a.number,a.amendment_date amendmentDate,a.reason,a.previous_total previousTotal,a.new_total newTotal,a.difference,a.currency,a.settlement,a.settlement_due_date settlementDueDate,a.changes_json changesJson,u.name createdBy FROM sale_amendments a JOIN users u ON u.id=a.created_by WHERE a.sale_id=? ORDER BY a.id DESC`).all(id) as {changesJson:string}[])
+    .map(({changesJson,...rest})=>({...rest,changes:JSON.parse(changesJson)}));
+  res.json({sale,items,schedule,shipments,returns,amendments});
+});
+
+// Onaylı sipariş revizyonu (ör. 10 tamburlu yerine 8 tamburlu + 2 silaj).
+// Kalemler güncellenir, fark cariye işlenir; sevk edilmiş miktarın altına inilemez (azaltmak için iade).
+const saleAmendmentSchema = z.object({
+  amendmentDate: z.string().date(),
+  reason: z.string().trim().min(3).max(500),
+  items: z.array(z.object({
+    saleItemId: z.number().int().positive().optional(),
+    productId: z.number().int().positive(),
+    quantity: z.number().min(0),
+    unitPrice: z.number().min(0),
+    vatRate: z.number().refine((rate) => [0, 10, 20].includes(rate), "KDV oranı %0, %10 veya %20 olmalıdır."),
+  })).min(1),
+  settlement: z.enum(["OPEN_ACCOUNT", "BANK_TRANSFER", "CHECK", "PROMISSORY_NOTE"]).default("OPEN_ACCOUNT"),
+  settlementDueDate: z.string().date().optional(),
+});
+app.post("/api/sales/:id/amendments", allow("ADMIN"), (req, res) => {
+  const parsed = saleAmendmentSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ message: parsed.error.issues[0]?.message && parsed.error.issues[0].path.includes("vatRate") ? parsed.error.issues[0].message : "Revizyon tarihi, nedeni ve kalemler zorunludur." });
+  const input = parsed.data;
+  if (input.amendmentDate > istanbulToday()) return res.status(400).json({ message: "Revizyon tarihi bugünden ileri olamaz." });
+  const saleId = Number(req.params.id);
+  try {
+    const result = transaction(() => {
+      const sale = db.prepare("SELECT id,number,status,customer_id customerId,created_by createdBy,order_kind orderKind,currency,exchange_rate exchangeRate,grand_total grandTotal FROM sales WHERE id=?").get(saleId) as
+        { id: number; number: string; status: string; customerId: number; createdBy: number; orderKind: "MACHINE" | "SPARE_PART"; currency: string; exchangeRate: number; grandTotal: number } | undefined;
+      if (!sale) throw new Error("Sipariş bulunamadı.");
+      if (!["APPROVED", "COMPLETED"].includes(sale.status)) throw new Error("Yalnızca onaylanmış sipariş revize edilebilir. Taslak siparişi Düzenle ile değiştirin.");
+      const existing = db.prepare(`SELECT si.id,si.product_id productId,si.quantity,si.line_total lineTotal,si.vat_rate vatRate,p.name,
+          (SELECT COALESCE(SUM(shi.quantity),0) FROM shipment_items shi JOIN shipments sh ON sh.id=shi.shipment_id WHERE shi.sale_item_id=si.id AND sh.status<>'CANCELLED') shipped,
+          (SELECT COUNT(*) FROM sale_return_items ri WHERE ri.sale_item_id=si.id) returnLines,
+          (SELECT COUNT(*) FROM shipment_items shi WHERE shi.sale_item_id=si.id) shipmentLines
+        FROM sale_items si JOIN products p ON p.id=si.product_id WHERE si.sale_id=?`).all(saleId) as
+        { id: number; productId: number; quantity: number; lineTotal: number; vatRate: number; name: string; shipped: number; returnLines: number; shipmentLines: number }[];
+      const byId = new Map(existing.map((x) => [x.id, x]));
+      for (const item of input.items) {
+        if (item.saleItemId && !byId.has(item.saleItemId)) throw new Error("Revize edilen kalem bu siparişe ait değil.");
+        if (item.saleItemId && byId.get(item.saleItemId)!.productId !== item.productId) throw new Error("Mevcut kalemin ürünü değiştirilemez; kalemi çıkarıp yeni ürün ekleyin.");
+      }
+      const kept = input.items.filter((x) => x.quantity > 0);
+      if (!kept.length) throw new Error("Siparişte en az bir kalem kalmalıdır. Siparişin tamamı için iade/iptal kullanın.");
+      if (new Set(kept.map((x) => x.productId)).size !== kept.length) throw new Error("Aynı ürün tek satırda olmalıdır.");
+      // Sevk edilmiş miktarın altına inilemez; listede olmayan mevcut kalemler çıkarılmış sayılır.
+      for (const line of existing) {
+        const target = input.items.find((x) => x.saleItemId === line.id);
+        const quantity = target ? target.quantity : 0;
+        if (quantity + 0.0001 < line.shipped) throw new Error(`${line.name}: ${line.shipped} adet sevk edilmiş; miktar bunun altına indirilemez (azaltmak için iade kullanın).`);
+        if (quantity === 0 && line.returnLines) throw new Error(`${line.name}: iade kaydı olan kalem çıkarılamaz.`);
+        if (quantity === 0 && line.shipmentLines) throw new Error(`${line.name}: sevkiyat kaydında (iptal edilmiş olsa da) geçtiği için çıkarılamaz; miktarını azaltın.`);
+      }
+      for (const item of kept) if (item.unitPrice <= 0) throw new Error("Birim fiyat sıfırdan büyük olmalıdır.");
+      const priced = priceSaleLines(kept, sale.orderKind);
+      const totals = saleTotals(priced);
+      const difference = Number((totals.grandTotal - sale.grandTotal).toFixed(2));
+      // Değişiklik özeti (eski / yeni kalemler)
+      const changes = [
+        ...existing.map((line) => {
+          const after = priced.find((x) => x.saleItemId === line.id);
+          return { product: line.name, oldQuantity: line.quantity, newQuantity: after?.quantity ?? 0, oldTotal: line.lineTotal, newTotal: after?.lineTotal ?? 0 };
+        }),
+        ...priced.filter((x) => !x.saleItemId).map((x) => ({ product: x.productName, oldQuantity: 0, newQuantity: x.quantity, oldTotal: 0, newTotal: x.lineTotal })),
+      ].filter((c) => c.oldQuantity !== c.newQuantity || Math.abs(c.oldTotal - c.newTotal) >= 0.01);
+      if (!changes.length) throw new Error("Siparişte değişiklik yapılmadı.");
+      if (difference > 0.009 && input.settlement !== "OPEN_ACCOUNT" && !input.settlementDueDate) throw new Error("Fark için vade tarihi seçin.");
+
+      // Kalemleri uygula
+      const update = db.prepare("UPDATE sale_items SET quantity=?,unit_price=?,vat_rate=?,line_total=? WHERE id=?");
+      const insert = db.prepare("INSERT INTO sale_items (sale_id,product_id,quantity,unit_price,vat_rate,line_total) VALUES (?,?,?,?,?,?)");
+      const remove = db.prepare("DELETE FROM sale_items WHERE id=?");
+      for (const line of existing) if (!priced.some((x) => x.saleItemId === line.id)) remove.run(line.id);
+      for (const line of priced) {
+        if (line.saleItemId) update.run(line.quantity, line.unitPrice, line.vatRate, line.lineTotal, line.saleItemId);
+        else insert.run(saleId, line.productId, line.quantity, line.unitPrice, line.vatRate, line.lineTotal);
+      }
+      db.prepare("UPDATE sales SET subtotal=?,vat_total=?,grand_total=? WHERE id=?").run(totals.subtotal, totals.vatTotal, totals.grandTotal, saleId);
+
+      const inserted = db.prepare(`INSERT INTO sale_amendments (sale_id,amendment_date,reason,previous_total,new_total,difference,currency,exchange_rate,settlement,settlement_due_date,changes_json,created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(saleId, input.amendmentDate, input.reason, sale.grandTotal, totals.grandTotal, difference, sale.currency, sale.exchangeRate, difference > 0.009 ? input.settlement : "NONE", difference > 0.009 && input.settlement !== "OPEN_ACCOUNT" ? input.settlementDueDate! : null, JSON.stringify(changes), req.user.id);
+      const amendmentId = Number(inserted.lastInsertRowid);
+      const number = `REV-${input.amendmentDate.slice(0, 4)}-${String(amendmentId).padStart(6, "0")}`;
+      db.prepare("UPDATE sale_amendments SET number=? WHERE id=?").run(number, amendmentId);
+
+      // Farkı cariye işle: artış borç, azalış alacak (avans).
+      if (Math.abs(difference) >= 0.01) {
+        const tryAmount = Number((Math.abs(difference) * sale.exchangeRate).toFixed(2));
+        postLedger({ customerId: sale.customerId, type: "SALE_AMENDMENT", date: input.amendmentDate, description: `${sale.number} sipariş revizyonu · ${number}${difference > 0 ? " · ek tutar" : " · tutar düştü"}`, debit: difference > 0 ? tryAmount : 0, credit: difference < 0 ? tryAmount : 0, currency: sale.currency, foreignAmount: Math.abs(difference), rate: sale.exchangeRate, sourceType: "SALE_AMENDMENT", sourceId: amendmentId, actorId: req.user.id });
+      }
+      // Artış için ödeme planı: vadeli havale satırı ya da planlı çek/senet.
+      if (difference > 0.009 && input.settlement !== "OPEN_ACCOUNT") {
+        const sequence = ((db.prepare("SELECT COALESCE(MAX(sequence_no),0) n FROM payment_schedules WHERE sale_id=?").get(saleId) as { n: number }).n) + 1;
+        const schedule = db.prepare("INSERT INTO payment_schedules (sale_id,sequence_no,payment_type,due_date,amount,currency,exchange_rate) VALUES (?,?,?,?,?,?,?)")
+          .run(saleId, sequence, input.settlement, input.settlementDueDate!, difference, sale.currency, sale.exchangeRate);
+        if (input.settlement === "CHECK" || input.settlement === "PROMISSORY_NOTE") {
+          const scheduleId = Number(schedule.lastInsertRowid);
+          db.prepare(`INSERT INTO negotiable_instruments (number,instrument_type,customer_id,sale_id,payment_schedule_id,due_date,amount,currency,exchange_rate,try_amount,created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+            .run(`EVR-${input.amendmentDate.slice(0, 4)}-${String(saleId).padStart(6, "0")}-${String(sequence).padStart(2, "0")}`, input.settlement, sale.customerId, saleId, scheduleId, input.settlementDueDate!, difference, sale.currency, sale.exchangeRate, Number((difference * sale.exchangeRate).toFixed(2)), req.user.id);
+          db.prepare("UPDATE payment_schedules SET status='INSTRUMENT_CREATED' WHERE id=?").run(scheduleId);
+        }
+      }
+      if (sale.createdBy !== req.user.id)
+        db.prepare("INSERT INTO notifications (user_id,title,message,link) VALUES (?,?,?,?)").run(sale.createdBy, "Sipariş revize edildi", `${sale.number}: ${input.reason}`, `/satislar/${saleId}`);
+      audit(req.user.id, "SALE_AMENDED", "sale", saleId, { grandTotal: sale.grandTotal, items: existing }, { number, ...input, grandTotal: totals.grandTotal, difference, changes }, req.ip, req.correlationId);
+      return { number, difference, newTotal: totals.grandTotal, currency: sale.currency };
+    });
+    const amount = Math.abs(result.difference).toLocaleString("tr-TR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    res.status(201).json({ ...result, message: `${result.number} kaydedildi. ${Math.abs(result.difference) < 0.01 ? "Sipariş tutarı değişmedi." : result.difference > 0 ? `Fark ${amount} ${result.currency} cariye borç olarak işlendi.` : `Fark ${amount} ${result.currency} cariye alacak (avans) olarak işlendi.`}` });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Revizyon kaydedilemedi." });
+  }
 });
 
 const saleReturnSchema = z.object({
@@ -1686,6 +1798,34 @@ app.get("/api/reports/machine-orders", (req, res) => {
   res.json({ from, to, includePending: statuses.length === 3, rows });
 });
 
+type SaleLineInput = { productId: number; quantity: number; unitPrice: number; vatRate: number };
+/**
+ * Sipariş satırlarını fiyatlar. Girilen birim fiyat KDV DAHİLDİR: satır toplamı girilen tutardır,
+ * KDV içinden ayrılır. unit_price sütunu KDV HARİÇ (net) saklanır ki eski kayıtlar ve e-belgeler tutarlı kalsın.
+ */
+function priceSaleLines<T extends SaleLineInput>(items: T[], orderKind: "MACHINE" | "SPARE_PART") {
+  return items.map((item) => {
+    const product = db.prepare("SELECT * FROM products WHERE id=? AND active=1").get(item.productId) as
+      | { id: number; name: string; unit_price: number; vat_rate: number; stock_quantity: number; stock_tracking: number; part_category: string }
+      | undefined;
+    if (!product) throw new Error("Ürün bulunamadı.");
+    if (orderKind === "SPARE_PART" && product.part_category === "MACHINE") throw new Error("Yedek parça siparişinde yalnızca parça seçilebilir.");
+    if (orderKind === "MACHINE" && product.part_category !== "MACHINE") throw new Error("Ana mamul siparişinde yalnızca ana mamul seçilebilir.");
+    if (product.stock_tracking && item.quantity > product.stock_quantity) throw new Error("Seçilen miktar kullanılabilir stoktan fazla.");
+    const vatRate = item.vatRate;
+    const divisor = 1 + vatRate / 100;
+    const grossUnit = Number(item.unitPrice.toFixed(4));
+    const lineTotal = Number((grossUnit * item.quantity).toFixed(2));
+    const lineNet = Number((lineTotal / divisor).toFixed(2));
+    return { ...item, productName: product.name, unitPrice: Number((grossUnit / divisor).toFixed(4)), vatRate, lineTotal, lineNet };
+  });
+}
+const saleTotals = (lines: { lineNet: number; lineTotal: number }[]) => {
+  const subtotal = Number(lines.reduce((sum, item) => sum + item.lineNet, 0).toFixed(2));
+  const grandTotal = Number(lines.reduce((sum, item) => sum + item.lineTotal, 0).toFixed(2));
+  return { subtotal, grandTotal, vatTotal: Number((grandTotal - subtotal).toFixed(2)) };
+};
+
 const saveSale = (req: Request, res: Response) => {
   const editId = req.params.id ? Number(req.params.id) : undefined;
   const previous = editId ? db.prepare("SELECT * FROM sales WHERE id=?").get(editId) as {status:string;created_by:number;number:string}|undefined : undefined;
@@ -1733,42 +1873,8 @@ const saveSale = (req: Request, res: Response) => {
   if (!customer)
     return res.status(404).json({ message: "Müşteri bulunamadı." });
 
-  const calculatedItems = input.items.map((item) => {
-    const product = db
-      .prepare("SELECT * FROM products WHERE id=? AND active=1")
-      .get(item.productId) as
-      | {
-          id: number;
-          unit_price: number;
-          vat_rate: number;
-          stock_quantity: number;
-          stock_tracking: number;
-          part_category: string;
-        }
-      | undefined;
-    if (!product) throw new Error("Ürün bulunamadı.");
-    if (input.orderKind === "SPARE_PART" && product.part_category === "MACHINE") throw new Error("Yedek parça siparişinde yalnızca parça seçilebilir.");
-    if (input.orderKind === "MACHINE" && product.part_category !== "MACHINE") throw new Error("Ana mamul siparişinde yalnızca ana mamul seçilebilir.");
-    if (product.stock_tracking && item.quantity > product.stock_quantity)
-      throw new Error("Seçilen miktar kullanılabilir stoktan fazla.");
-    // Girilen fiyat KDV dahildir. Satır toplamı girilen tutardır; KDV bunun içinden ayrılır.
-    // unit_price sütunu eskisi gibi KDV HARİÇ (net) saklanır ki eski kayıtlar ve e-belgeler tutarlı kalsın.
-    const vatRate = item.vatRate;
-    const divisor = 1 + vatRate / 100;
-    const grossUnit = Number(item.unitPrice.toFixed(4));
-    const lineTotal = Number((grossUnit * item.quantity).toFixed(2));
-    const lineNet = Number((lineTotal / divisor).toFixed(2));
-    return {
-      ...item,
-      unitPrice: Number((grossUnit / divisor).toFixed(4)),
-      vatRate,
-      lineTotal,
-      lineNet,
-    };
-  });
-  const subtotal = Number(calculatedItems.reduce((sum, item) => sum + item.lineNet, 0).toFixed(2));
-  const grandTotal = Number(calculatedItems.reduce((sum, item) => sum + item.lineTotal, 0).toFixed(2));
-  const vatTotal = Number((grandTotal - subtotal).toFixed(2));
+  const calculatedItems = priceSaleLines(input.items, input.orderKind);
+  const { subtotal, grandTotal, vatTotal } = saleTotals(calculatedItems);
   if (input.advanceAmount * input.exchangeRate > Math.max(0, -Number(customer.balance)) + 0.01) return res.status(400).json({message:"Kullanılabilir cari avans yetersiz."});
   if (input.downPayment + input.advanceAmount > grandTotal)
     return res

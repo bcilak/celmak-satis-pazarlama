@@ -200,6 +200,43 @@ try {
  const pastTerm=await request(sales,'/sales','POST',{...pastOrder,paymentMethod:'MIXED',instrumentType:'CHECK',instrumentCount:1,downPayment:10000,paymentSchedule:[{dueDate:'2025-04-10',amount:100000}]},201);
  detail=await request(admin,`/sales/${pastTerm.id}/detail`);assert.equal(detail.schedule.find(x=>x.sequenceNo===0).dueDate,'2025-03-10');
 
+ // Sipariş revizyonu: 10 tamburlu onaylandı, 3'ü sevk edildi; bayi 8 tamburlu + 2 silaj istedi.
+ const [tambur,silaj]=products.filter(x=>x.partCategory==='MACHINE');
+ const revCustomer=await request(sales,'/customers','POST',{name:'Revizyon Bayi',tags:['DEALER']},201);
+ const revBalance=async()=>(await request(admin,`/customers/${revCustomer.id}/ledger`)).customer.balance;
+ const revOrder=await request(sales,'/sales','POST',{customerId:revCustomer.id,orderKind:'MACHINE',advanceAmount:0,paymentMethod:'TERM',paymentTermDays:30,downPayment:0,currency:'TRY',exchangeRate:1,approvalAssigneeId:manager.id,items:[{productId:tambur.id,quantity:10,unitPrice:100000,vatRate:10}],paymentSchedule:[{dueDate:'2026-12-31',amount:1000000}]},201);
+ const amendBody=(items,extra={})=>({amendmentDate:'2026-11-15',reason:'Bayi 8 tamburlu + 2 silaj istedi',items,...extra});
+ await request(admin,`/sales/${revOrder.id}/amendments`,'POST',amendBody([{saleItemId:1,productId:tambur.id,quantity:8,unitPrice:100000,vatRate:10}]),400);
+ await request(sales,`/sales/${revOrder.id}/submit`,'POST');approval=await approvalFor(revOrder.id);
+ await request(admin,`/approvals/${approval.id}/decision`,'POST',{decision:'APPROVED'});
+ assert.equal(await revBalance(),1000000);
+ let revDetail=await request(admin,`/sales/${revOrder.id}/detail`);const tamburLine=revDetail.items[0];
+ await request(admin,'/shipments','POST',{saleId:revOrder.id,plannedDate:'2026-11-14',deliveryAddress:'Bayi deposu',items:[{saleItemId:tamburLine.id,quantity:3}]},201);
+ await request(sales,`/sales/${revOrder.id}/amendments`,'POST',amendBody([{saleItemId:tamburLine.id,productId:tambur.id,quantity:8,unitPrice:100000,vatRate:10}]),403);
+ const belowShipped=await request(admin,`/sales/${revOrder.id}/amendments`,'POST',amendBody([{saleItemId:tamburLine.id,productId:tambur.id,quantity:2,unitPrice:100000,vatRate:10}]),400);
+ assert.match(belowShipped.message,/sevk edilmiş/);
+ await request(admin,`/sales/${revOrder.id}/amendments`,'POST',amendBody([{saleItemId:tamburLine.id,productId:tambur.id,quantity:10,unitPrice:100000,vatRate:10}]),400);
+ const rev=await request(admin,`/sales/${revOrder.id}/amendments`,'POST',amendBody([
+  {saleItemId:tamburLine.id,productId:tambur.id,quantity:8,unitPrice:100000,vatRate:10},
+  {productId:silaj.id,quantity:2,unitPrice:150000,vatRate:10},
+ ],{settlement:'CHECK',settlementDueDate:'2027-01-15'}),201);
+ assert.equal(rev.difference,100000);assert.equal(rev.newTotal,1100000);
+ assert.equal(await revBalance(),1100000,'Fark cariye borç olarak işlenmeli');
+ revDetail=await request(admin,`/sales/${revOrder.id}/detail`);
+ assert.deepEqual(revDetail.items.map(x=>x.quantity).sort(),[2,8]);assert.equal(revDetail.sale.grandTotal,1100000);
+ assert.equal(revDetail.amendments.length,1);assert.equal(revDetail.amendments[0].changes.length,2);
+ const diffRow=revDetail.schedule.find(x=>x.paymentType==='CHECK');assert.equal(diffRow.amount,100000);assert.equal(diffRow.dueDate,'2027-01-15');
+ assert.ok((await request(admin,'/instruments')).some(x=>x.saleNumber===revOrder.number&&x.amount===100000&&x.status==='PLANNED'),'Fark için planlı çek oluşmalı');
+ const revPlan=await request(admin,`/sales/${revOrder.id}/shipment-plan`);
+ assert.deepEqual(revPlan.items.map(x=>x.remainingQuantity).sort(),[2,5],'Sevk planı yeni miktarlara göre güncellenmeli');
+ // Fiyat düşerse fark cariye alacak işlenir; sevk edilmiş kalem çıkarılamaz.
+ revDetail=await request(admin,`/sales/${revOrder.id}/detail`);
+ const silajLine=revDetail.items.find(x=>x.productId===silaj.id),tamburNow=revDetail.items.find(x=>x.productId===tambur.id);
+ await request(admin,`/sales/${revOrder.id}/amendments`,'POST',amendBody([{saleItemId:silajLine.id,productId:silaj.id,quantity:2,unitPrice:150000,vatRate:10}]),400);
+ const cheaper=await request(admin,`/sales/${revOrder.id}/amendments`,'POST',amendBody([{saleItemId:tamburNow.id,productId:tambur.id,quantity:8,unitPrice:100000,vatRate:10},{saleItemId:silajLine.id,productId:silaj.id,quantity:2,unitPrice:100000,vatRate:10}]),201);
+ assert.equal(cheaper.difference,-100000);assert.equal(await revBalance(),1000000,'İndirim cariye alacak olarak işlenmeli');
+ assert.ok((await request(admin,`/customers/${revCustomer.id}/ledger`)).transactions.filter(t=>t.transactionType==='SALE_AMENDMENT').length===2);
+
  const checksCustomer=await request(sales,'/customers','POST',{name:'Çek Bağlantı Test Cari',riskLimit:5000000},201);
  const checksBalance=async()=> (await request(admin,`/customers/${checksCustomer.id}/ledger`)).customer.balance;
  const checks=[500000,500000,1000000,1000000].map((amount,i)=>({amount,issuer:'Test Keşideci',bankName:'Test Bankası',serialNumber:`BAG-${i}`,issueDate:'2026-10-01',dueDate:`2027-0${i+1}-15`}));
@@ -226,7 +263,7 @@ try {
  assert.equal(history[0].checks[0].status,'COLLECTED');assert.equal(history[0].checks[1].status,'BOUNCED');
  console.log('PASS: eşit olmayan 4 çek, hedef/toplam farkı, grup kaydı, mükerrer/tekrar istek koruması, atomik geri alma, tahsilat ve karşılıksız çek bakiyesi');
  console.log('PASS: parça siparişi, düzenleme, revizyon, onay, 2 milyon avans, makine/parça mahsup, kısmi avans, mükerrer ve yetersiz bakiye kontrolleri');
- console.log('PASS: KDV dahil fiyat, 0/10/20 KDV kısıtı, kredi kartı tahsilatı, iade (sevk/yetki/miktar kontrolleri), makine raporu, cari notu, Excel ile toplu cari, cari düzenleme ve silme, açılış bakiyesi (devir), kullanıcı yönetimi ve parola değiştirme, geçmiş tarihli sipariş');
+ console.log('PASS: KDV dahil fiyat, 0/10/20 KDV kısıtı, kredi kartı tahsilatı, iade (sevk/yetki/miktar kontrolleri), makine raporu, cari notu, Excel ile toplu cari, cari düzenleme ve silme, açılış bakiyesi (devir), kullanıcı yönetimi ve parola değiştirme, geçmiş tarihli sipariş, onaylı sipariş revizyonu');
 } finally {
  server.kill();await new Promise(r=>server.once('exit',r));
  assert.equal(dirname(resolve(dataDir)),resolve(tmpdir()));
