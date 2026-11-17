@@ -63,6 +63,16 @@ const sessionCookie = (token: string, maxAge = 43200) => {
     .join("; ");
 };
 
+const saleCustomerName = (saleId: number) =>
+  (db.prepare("SELECT c.name FROM sales s JOIN customers c ON c.id=s.customer_id WHERE s.id=?").get(saleId) as { name: string } | undefined)?.name || "";
+const moneyText = (value: number, currency = "TRY") =>
+  `${value.toLocaleString("tr-TR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency === "TRY" ? "TL" : currency}`;
+
+/** Uygulama içi bildirim yazar; kullanıcı üst çubuktaki bildirim zilinde görür. */
+function notifyUser(userId: number, title: string, message: string, link: string) {
+  db.prepare("INSERT INTO notifications (user_id,title,message,link) VALUES (?,?,?,?)").run(userId, title, message, link);
+}
+
 function postLedger(input: {
   customerId: number;
   type: string;
@@ -691,6 +701,26 @@ app.get("/api/session", (req, res) => {
   res.json({ currentUser: req.user, users, security });
 });
 
+// Uygulama içi bildirimler (üst çubuktaki zil): okunmamış sayısı, son bildirimler ve
+// kullanıcıya atanmış bekleyen onay sayısı (Onaylar menüsündeki rozet).
+app.get("/api/notifications", (req, res) => {
+  const items = db.prepare("SELECT id,title,message,link,read_at readAt,created_at createdAt FROM notifications WHERE user_id=? ORDER BY id DESC LIMIT 30").all(req.user.id);
+  const unread = (db.prepare("SELECT COUNT(*) n FROM notifications WHERE user_id=? AND read_at IS NULL").get(req.user.id) as { n: number }).n;
+  const pendingApprovals = (db.prepare("SELECT COUNT(*) n FROM approvals WHERE assigned_to=? AND status='PENDING'").get(req.user.id) as { n: number }).n;
+  res.json({ unread, pendingApprovals, items });
+});
+app.post("/api/notifications/read", (req, res) => {
+  const parsed = z.object({ ids: z.array(z.number().int().positive()).max(200).optional() }).safeParse(req.body ?? {});
+  if (!parsed.success) return res.status(400).json({ message: "Geçersiz istek." });
+  if (parsed.data.ids?.length) {
+    const mark = db.prepare("UPDATE notifications SET read_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=? AND read_at IS NULL");
+    transaction(() => { for (const id of parsed.data.ids!) mark.run(id, req.user.id); });
+  } else {
+    db.prepare("UPDATE notifications SET read_at=CURRENT_TIMESTAMP WHERE user_id=? AND read_at IS NULL").run(req.user.id);
+  }
+  res.json({ message: "Bildirimler okundu olarak işaretlendi." });
+});
+
 app.get("/api/admin/users",allow("ADMIN"),(_req,res)=>{
   const users=db.prepare(`SELECT id,name,role,email,active,must_change_password mustChangePassword,
     (SELECT MAX(created_at) FROM auth_sessions s WHERE s.user_id=users.id) lastLoginAt FROM users ORDER BY active DESC,name`).all() as {id:number;name:string;role:AppUser["role"];email:string;active:number;mustChangePassword:number;lastLoginAt:string|null}[];
@@ -831,6 +861,7 @@ const customerSchema = z.object({
   name: z.string().trim().min(2).max(180),
   code: z.string().trim().min(2).max(40).optional(),
   taxNumber: z.string().trim().max(11).optional(),
+  taxOffice: z.string().trim().max(80).optional(),
   phone: z.string().trim().max(30).optional(),
   email: z.string().email().optional().or(z.literal("")),
   city: z.string().trim().max(80).optional(),
@@ -851,8 +882,8 @@ function insertCustomer(input: CustomerInput, req: Request, source = "FORM") {
   const temporary = `TMP-${randomUUID()}`;
   const inserted = db
     .prepare(
-      `INSERT INTO customers (code,name,tax_number,phone,email,city,district,address,payment_term_days,risk_limit,code_source,external_system,external_id,note)
-  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO customers (code,name,tax_number,phone,email,city,district,address,payment_term_days,risk_limit,code_source,external_system,external_id,note,tax_office)
+  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     )
     .run(
       input.code || temporary,
@@ -869,6 +900,7 @@ function insertCustomer(input: CustomerInput, req: Request, source = "FORM") {
       input.externalSystem || null,
       input.externalId || null,
       input.note || null,
+      input.taxOffice || null,
     );
   const id = Number(inserted.lastInsertRowid);
   const code = input.codeSource === "AUTO" ? `MUS-${String(id).padStart(6, "0")}` : input.code!;
@@ -930,7 +962,7 @@ const customerImportSchema = z.object({
   paymentTermDays: z.number().int().min(0).max(365).default(30),
   riskLimit: z.number().min(0).default(0),
   rows: z
-    .array(customerSchema.pick({ name: true, city: true, district: true, address: true, phone: true, taxNumber: true, email: true, note: true }))
+    .array(customerSchema.pick({ name: true, city: true, district: true, address: true, phone: true, taxNumber: true, taxOffice: true, email: true, note: true }))
     .min(1)
     .max(2000),
 });
@@ -972,7 +1004,7 @@ app.get("/api/customers/:id", (req, res) => {
   const customer = db
     .prepare(
       `SELECT id,code,name,tax_number taxNumber,phone,email,city,payment_term_days paymentTermDays,
-    risk_limit riskLimit,balance,code_source codeSource,external_system externalSystem,external_id externalId,created_at createdAt,note,district,address,
+    risk_limit riskLimit,balance,code_source codeSource,external_system externalSystem,external_id externalId,created_at createdAt,note,district,address,tax_office taxOffice,
     (SELECT GROUP_CONCAT(tag) FROM customer_tags ct WHERE ct.customer_id=customers.id) tags
     FROM customers WHERE id=? AND active=1`,
     )
@@ -1124,13 +1156,13 @@ app.put("/api/customers/:id", allow("ADMIN", "SALES", "ACCOUNTING"), (req, res) 
   const parsed = customerUpdateSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ message: "Cari bilgileri eksik veya geçersiz." });
   const id = Number(req.params.id);
-  const previous = db.prepare(`SELECT name,tax_number taxNumber,phone,email,city,district,address,payment_term_days paymentTermDays,risk_limit riskLimit,note,
+  const previous = db.prepare(`SELECT name,tax_number taxNumber,tax_office taxOffice,phone,email,city,district,address,payment_term_days paymentTermDays,risk_limit riskLimit,note,
     (SELECT GROUP_CONCAT(tag) FROM customer_tags ct WHERE ct.customer_id=customers.id) tags FROM customers WHERE id=? AND active=1`).get(id);
   if (!previous) return res.status(404).json({ message: "Cari bulunamadı." });
   const input = parsed.data;
   transaction(() => {
-    db.prepare(`UPDATE customers SET name=?,tax_number=?,phone=?,email=?,city=?,district=?,address=?,payment_term_days=?,risk_limit=?,note=? WHERE id=?`)
-      .run(input.name, input.taxNumber || null, input.phone || null, input.email || null, input.city || null, input.district || null, input.address || null, input.paymentTermDays, input.riskLimit, input.note || null, id);
+    db.prepare(`UPDATE customers SET name=?,tax_number=?,tax_office=?,phone=?,email=?,city=?,district=?,address=?,payment_term_days=?,risk_limit=?,note=? WHERE id=?`)
+      .run(input.name, input.taxNumber || null, input.taxOffice || null, input.phone || null, input.email || null, input.city || null, input.district || null, input.address || null, input.paymentTermDays, input.riskLimit, input.note || null, id);
     db.prepare("DELETE FROM customer_tags WHERE customer_id=?").run(id);
     const addTag = db.prepare("INSERT INTO customer_tags (customer_id,tag) VALUES (?,?)");
     for (const tag of new Set(input.tags)) addTag.run(id, tag);
@@ -1198,8 +1230,22 @@ app.get("/api/customers/:id/ledger", (req, res) => {
     n.id instrumentId,n.number instrumentNumber,n.status instrumentStatus,n.issuer,n.serial_number serialNumber,n.bank_name bankName
     FROM payment_schedules ps JOIN sales s ON s.id=ps.sale_id LEFT JOIN negotiable_instruments n ON n.payment_schedule_id=ps.id
     WHERE s.customer_id=? AND s.status IN ('APPROVED','COMPLETED') AND ps.payment_type<>'CASH' AND ps.status NOT IN ('PAID','CANCELLED') ORDER BY ps.due_date,ps.id`).all(id);
-  res.json({ customer, transactions, reconciliations, schedules });
+  // Düzeltilebilir avans kayıtları: vadeye bağlı olmayan tahsilatlar ve açılış bakiyesi (devir).
+  const advanceReceipts=db.prepare(`SELECT r.id,r.number,r.method,r.receipt_date receiptDate,r.amount,r.currency,r.exchange_rate exchangeRate,r.try_amount tryAmount,r.reference,r.note,u.name createdBy
+    FROM receipts r LEFT JOIN users u ON u.id=r.created_by WHERE r.customer_id=? AND r.status='COMPLETED' AND r.payment_schedule_id IS NULL ORDER BY r.receipt_date DESC,r.id DESC`).all(id);
+  const opening=openingBalanceOf(id);
+  res.json({ customer, transactions, reconciliations, schedules, advanceReceipts, opening });
 });
+
+/** Carinin açılış bakiyesi (devir) ve düzeltmelerinin net tutarı; işaret: + borç, − avans. */
+function openingBalanceOf(customerId: number) {
+  const first = db.prepare("SELECT transaction_date date,currency,exchange_rate rate FROM account_transactions WHERE customer_id=? AND transaction_type='OPENING_BALANCE'").get(customerId) as
+    { date: string; currency: string | null; rate: number | null } | undefined;
+  if (!first) return null;
+  const net = db.prepare("SELECT COALESCE(SUM(debit-credit),0) n FROM account_transactions WHERE customer_id=? AND transaction_type IN ('OPENING_BALANCE','OPENING_BALANCE_ADJUSTMENT')").get(customerId) as { n: number };
+  const rate = first.rate || 1;
+  return { date: first.date, currency: first.currency || "TRY", exchangeRate: rate, amount: Number((net.n / rate).toFixed(2)), tryAmount: Number(net.n.toFixed(2)) };
+}
 
 const receiptSchema = z.object({
   customerId: z.number().int().positive(),
@@ -1347,6 +1393,72 @@ app.post(
   },
 );
 
+// Avans / tahsilat düzeltme: kayıt silinmez; eski tahsilat ters kayıtla kapanır, doğru tutarla yenisi açılır.
+const receiptCorrectionSchema = z.object({
+  method: z.enum(["CASH", "BANK_TRANSFER"]),
+  receiptDate: z.string().date(),
+  amount: z.number().positive(),
+  exchangeRate: z.number().positive(),
+  reference: z.string().trim().max(100).optional(),
+  note: z.string().trim().max(500).optional(),
+  reason: z.string().trim().min(3).max(300),
+});
+app.put("/api/receipts/:id", allow("ADMIN", "ACCOUNTING"), (req, res) => {
+  const parsed = receiptCorrectionSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ message: "Tutar, tarih ve düzeltme nedeni zorunludur." });
+  const input = parsed.data;
+  if (input.receiptDate > istanbulToday()) return res.status(400).json({ message: "Tahsilat tarihi bugünden ileri olamaz." });
+  const old = db.prepare("SELECT * FROM receipts WHERE id=? AND status='COMPLETED'").get(Number(req.params.id)) as
+    { id: number; number: string; customer_id: number; sale_id: number | null; payment_schedule_id: number | null; method: string; receipt_date: string; amount: number; currency: string; exchange_rate: number; try_amount: number } | undefined;
+  if (!old) return res.status(404).json({ message: "Aktif tahsilat bulunamadı." });
+  if (old.payment_schedule_id) return res.status(409).json({ message: "Vadeye bağlı tahsilat burada düzeltilemez; Tahsilatlar ekranından iptal edip yeniden girin." });
+  if (old.method === "CHECK") return res.status(409).json({ message: "Çekle alınan avans Çek ve Senetler ekranından düzeltilir." });
+  if (old.currency === "TRY" && input.exchangeRate !== 1) return res.status(400).json({ message: "TL işlemlerde kur 1 olmalıdır." });
+  const result = transaction(() => {
+    db.prepare("UPDATE receipts SET status='REVERSED' WHERE id=?").run(old.id);
+    const original = db.prepare("SELECT id FROM account_transactions WHERE source_type='RECEIPT' AND source_id=?").get(old.id) as { id: number } | undefined;
+    postLedger({ customerId: old.customer_id, type: "RECEIPT_REVERSAL", date: input.receiptDate, description: `${old.number} düzeltme için ters kayıt · ${input.reason}`.slice(0, 300), debit: old.try_amount, currency: old.currency, foreignAmount: old.amount, rate: old.exchange_rate, sourceType: "RECEIPT_REVERSAL", sourceId: old.id, actorId: req.user.id, reversalOfId: original?.id });
+    const tryAmount = Number((input.amount * input.exchangeRate).toFixed(2));
+    const inserted = db.prepare(`INSERT INTO receipts (customer_id,sale_id,payment_schedule_id,method,receipt_date,amount,currency,exchange_rate,try_amount,reference,note,created_by) VALUES (?,?,NULL,?,?,?,?,?,?,?,?,?)`)
+      .run(old.customer_id, old.sale_id, input.method, input.receiptDate, input.amount, old.currency, input.exchangeRate, tryAmount, input.reference || null, input.note || null, req.user.id);
+    const id = Number(inserted.lastInsertRowid);
+    const number = `THS-${input.receiptDate.slice(0, 4)}-${String(id).padStart(6, "0")}`;
+    db.prepare("UPDATE receipts SET number=? WHERE id=?").run(number, id);
+    postLedger({ customerId: old.customer_id, type: input.method === "CASH" ? "CASH_RECEIPT" : "BANK_RECEIPT", date: input.receiptDate, description: `${number} tahsilat (${old.number} düzeltmesi)`, credit: tryAmount, currency: old.currency, foreignAmount: input.amount, rate: input.exchangeRate, sourceType: "RECEIPT", sourceId: id, actorId: req.user.id });
+    audit(req.user.id, "RECEIPT_CORRECTED", "receipt", id, { number: old.number, amount: old.amount, receiptDate: old.receipt_date, method: old.method }, { number, ...input }, req.ip, req.correlationId);
+    return { id, number };
+  });
+  res.json({ ...result, message: `${old.number} düzeltildi; yeni kayıt ${result.number}.` });
+});
+
+// Açılış bakiyesi (devir) düzeltme: istenen yeni tutar ile mevcut tutar arasındaki fark ayrı satırla işlenir.
+const openingCorrectionSchema = z.object({
+  amount: z.number().finite(),
+  date: z.string().date(),
+  reason: z.string().trim().min(3).max(300),
+});
+app.put("/api/customers/:id/opening-balance", allow("ADMIN", "ACCOUNTING"), (req, res) => {
+  const parsed = openingCorrectionSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ message: "Yeni tutar, tarih ve düzeltme nedeni zorunludur." });
+  const customerId = Number(req.params.id);
+  const opening = openingBalanceOf(customerId);
+  if (!opening) return res.status(404).json({ message: "Bu carinin açılış bakiyesi yok. Açılış bakiyesi Cariler ekranındaki aktarımla girilir." });
+  const input = parsed.data;
+  if (input.date > istanbulToday()) return res.status(400).json({ message: "Düzeltme tarihi bugünden ileri olamaz." });
+  const difference = Number((input.amount - opening.amount).toFixed(2));
+  if (Math.abs(difference) < 0.01) return res.status(400).json({ message: "Tutar değişmedi." });
+  transaction(() => {
+    const inserted = db.prepare("INSERT INTO opening_balance_adjustments (customer_id,adjustment_date,previous_amount,new_amount,currency,exchange_rate,reason,created_by) VALUES (?,?,?,?,?,?,?,?)")
+      .run(customerId, input.date, opening.amount, input.amount, opening.currency, opening.exchangeRate, input.reason, req.user.id);
+    const adjustmentId = Number(inserted.lastInsertRowid);
+    const tryAmount = Number((Math.abs(difference) * opening.exchangeRate).toFixed(2));
+    const fmt = (v: number) => `${v.toLocaleString("tr-TR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${opening.currency}`;
+    postLedger({ customerId, type: "OPENING_BALANCE_ADJUSTMENT", date: input.date, description: `Açılış bakiyesi düzeltmesi · ${fmt(opening.amount)} → ${fmt(input.amount)} · ${input.reason}`.slice(0, 300), debit: difference > 0 ? tryAmount : 0, credit: difference < 0 ? tryAmount : 0, currency: opening.currency, foreignAmount: Math.abs(difference), rate: opening.exchangeRate, sourceType: "OPENING_BALANCE_ADJUSTMENT", sourceId: adjustmentId, actorId: req.user.id });
+    audit(req.user.id, "OPENING_BALANCE_CORRECTED", "customer", customerId, { amount: opening.amount }, { ...input, difference }, req.ip, req.correlationId);
+  });
+  res.json({ message: "Açılış bakiyesi düzeltildi; fark cariye işlendi.", difference });
+});
+
 const reconciliationSchema = z.object({
   statementDate: z.string().date(),
   declaredBalance: z.number(),
@@ -1462,7 +1574,7 @@ app.get("/api/products", (_req, res) => {
     vat_rate vatRate, stock_quantity stockQuantity, part_category partCategory, inventory_source inventorySource,
     external_id externalId, product_group productGroup, product_subgroup productSubgroup, manufacturer_model manufacturerModel,
     manual_price manualPrice, stock_tracking stockTracking
-    FROM products WHERE active=1 ORDER BY CASE WHEN product_group IS NULL THEN 1 ELSE 0 END, product_group, name`,
+    FROM products WHERE active=1 AND is_custom=0 ORDER BY CASE WHEN product_group IS NULL THEN 1 ELSE 0 END, product_group, name`,
       )
       .all(),
   );
@@ -1554,6 +1666,31 @@ app.post("/api/products/parts",allow("ADMIN","SALES"),(req,res)=>{
   res.status(201).json({id});
 });
 
+// Katalog dışı ürün: siparişte adı yazılan tek seferlik ürün (ör. "Römork 5 ton, 5 lastikli").
+// Ürün kaydı sipariş/sevk/rapor için oluşur ama katalog listelerinde görünmez.
+const customProductSchema = z.object({
+  name: z.string().trim().min(3).max(180),
+  orderKind: z.enum(["MACHINE", "SPARE_PART"]),
+  unit: z.string().trim().min(1).max(20).default("ADET"),
+  vatRate: z.number().refine((rate) => [0, 10, 20].includes(rate), "KDV oranı %0, %10 veya %20 olmalıdır."),
+});
+app.post("/api/products/custom", allow("ADMIN", "SALES"), (req, res) => {
+  const parsed = customProductSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ message: "Ürün adı en az 3 karakter olmalıdır." });
+  const p = parsed.data;
+  const partCategory = p.orderKind === "MACHINE" ? "MACHINE" : "OTHER";
+  const product = transaction(() => {
+    const result = db.prepare(`INSERT INTO products (code,name,unit,unit_price,minimum_price,vat_rate,stock_quantity,part_category,inventory_source,manual_price,stock_tracking,is_custom)
+      VALUES (?,?,?,0,0,?,0,?,'LOCAL',1,0,1)`).run(`TMP-${randomUUID()}`, p.name, p.unit, p.vatRate, partCategory);
+    const id = Number(result.lastInsertRowid);
+    const code = `OZL-${String(id).padStart(6, "0")}`;
+    db.prepare("UPDATE products SET code=? WHERE id=?").run(code, id);
+    audit(req.user.id, "CUSTOM_PRODUCT_CREATED", "product", id, null, { ...p, code }, req.ip, req.correlationId);
+    return { id, code, name: p.name, unit: p.unit, unitPrice: 0, minimumPrice: 0, vatRate: p.vatRate, stockQuantity: 0, partCategory, inventorySource: "LOCAL", manualPrice: 1, stockTracking: 0, isCustom: 1 };
+  });
+  res.status(201).json(product);
+});
+
 const saleSchema = z.object({
   orderKind: z.enum(["MACHINE", "SPARE_PART"]).default("MACHINE"),
   advanceAmount: z.number().min(0).default(0),
@@ -1605,18 +1742,18 @@ app.get("/api/sales", (_req, res) => {
 app.get("/api/approval-assignees", allow("SALES","ADMIN"), (req,res)=>res.json(db.prepare("SELECT id,name,email FROM users WHERE role='ADMIN' AND active=1 AND id<>? ORDER BY name").all(req.user.id)));
 
 app.get("/api/sales/:id/detail", (req,res)=>{
-  const id=Number(req.params.id);const sale=db.prepare(`SELECT s.id,s.number,s.status,s.note,s.order_kind orderKind,s.advance_amount advanceAmount,s.approval_assignee_id approvalAssigneeId,s.instrument_type instrumentType,s.payment_method paymentMethod,s.card_installments cardInstallments,s.subtotal,s.vat_total vatTotal,s.grand_total grandTotal,s.down_payment downPayment,s.currency,s.exchange_rate exchangeRate,s.created_at createdAt,COALESCE(s.order_date,date(s.created_at)) orderDate,s.approved_at approvedAt,c.id customerId,c.code customerCode,c.name customerName,c.tax_number customerTaxNumber,c.phone customerPhone,c.email customerEmail,c.city customerCity,u.name createdBy,a.name approvalAssignee FROM sales s JOIN customers c ON c.id=s.customer_id JOIN users u ON u.id=s.created_by LEFT JOIN users a ON a.id=s.approval_assignee_id WHERE s.id=?`).get(id);
+  const id=Number(req.params.id);const sale=db.prepare(`SELECT s.id,s.number,s.status,s.note,s.order_kind orderKind,s.advance_amount advanceAmount,s.approval_assignee_id approvalAssigneeId,s.instrument_type instrumentType,s.payment_method paymentMethod,s.card_installments cardInstallments,s.subtotal,s.vat_total vatTotal,s.grand_total grandTotal,s.down_payment downPayment,s.currency,s.exchange_rate exchangeRate,s.created_at createdAt,COALESCE(s.order_date,date(s.created_at)) orderDate,s.approved_at approvedAt,c.id customerId,c.code customerCode,c.name customerName,c.tax_number customerTaxNumber,c.tax_office customerTaxOffice,c.phone customerPhone,c.email customerEmail,c.city customerCity,c.district customerDistrict,c.address customerAddress,u.name createdBy,a.name approvalAssignee FROM sales s JOIN customers c ON c.id=s.customer_id JOIN users u ON u.id=s.created_by LEFT JOIN users a ON a.id=s.approval_assignee_id WHERE s.id=?`).get(id);
   if(!sale)return res.status(404).json({message:"Satış bulunamadı."});
-  const items=db.prepare(`SELECT si.id,si.product_id productId,p.code,p.name,p.unit,p.manufacturer_model model,p.product_group productGroup,si.quantity,si.unit_price unitPrice,si.vat_rate vatRate,si.line_total lineTotal,
+  const items=db.prepare(`SELECT si.id,si.product_id productId,p.code,p.name,p.unit,p.manufacturer_model model,p.product_group productGroup,p.part_category partCategory,p.is_custom isCustom,si.quantity,si.unit_price unitPrice,si.vat_rate vatRate,si.line_total lineTotal,
     (SELECT COALESCE(SUM(shi.quantity),0) FROM shipment_items shi JOIN shipments sh ON sh.id=shi.shipment_id WHERE shi.sale_item_id=si.id AND sh.status<>'CANCELLED') shippedQuantity,
     (SELECT COALESCE(SUM(ri.quantity),0) FROM sale_return_items ri WHERE ri.sale_item_id=si.id) returnedQuantity
     FROM sale_items si JOIN products p ON p.id=si.product_id WHERE si.sale_id=?`).all(id);
-  const schedule=db.prepare(`SELECT sequence_no sequenceNo,payment_type paymentType,due_date dueDate,amount,paid_amount paidAmount,currency,status FROM payment_schedules WHERE sale_id=? ORDER BY sequence_no`).all(id);
-  const shipments=db.prepare(`SELECT id,number,status,planned_date plannedDate,actual_date actualDate,dispatch_number dispatchNumber FROM shipments WHERE sale_id=? ORDER BY id DESC`).all(id);
+  const schedule=db.prepare(`SELECT ps.id,ps.sequence_no sequenceNo,ps.payment_type paymentType,ps.due_date dueDate,ps.amount,ps.paid_amount paidAmount,ps.currency,ps.status,n.id instrumentId,n.number instrumentNumber,n.status instrumentStatus FROM payment_schedules ps LEFT JOIN negotiable_instruments n ON n.payment_schedule_id=ps.id AND n.status<>'CANCELLED' WHERE ps.sale_id=? AND ps.status<>'CANCELLED' ORDER BY ps.sequence_no`).all(id);
+  const shipments=db.prepare(`SELECT id,number,status,planned_date plannedDate,actual_date actualDate,dispatch_number dispatchNumber,delivery_address deliveryAddress FROM shipments WHERE sale_id=? ORDER BY id DESC`).all(id);
   const returns=(db.prepare(`SELECT r.id,r.number,r.return_date returnDate,r.reason,r.subtotal,r.vat_total vatTotal,r.grand_total grandTotal,r.currency,u.name createdBy FROM sale_returns r JOIN users u ON u.id=r.created_by WHERE r.sale_id=? ORDER BY r.id DESC`).all(id) as {id:number}[])
     .map(r=>({...r,items:db.prepare(`SELECT ri.quantity,ri.line_total lineTotal,p.name,p.code,p.unit FROM sale_return_items ri JOIN products p ON p.id=ri.product_id WHERE ri.return_id=?`).all(r.id)}));
-  const amendments=(db.prepare(`SELECT a.id,a.number,a.amendment_date amendmentDate,a.reason,a.previous_total previousTotal,a.new_total newTotal,a.difference,a.currency,a.settlement,a.settlement_due_date settlementDueDate,a.changes_json changesJson,u.name createdBy FROM sale_amendments a JOIN users u ON u.id=a.created_by WHERE a.sale_id=? ORDER BY a.id DESC`).all(id) as {changesJson:string}[])
-    .map(({changesJson,...rest})=>({...rest,changes:JSON.parse(changesJson)}));
+  const amendments=(db.prepare(`SELECT a.id,a.number,a.amendment_date amendmentDate,a.reason,a.previous_total previousTotal,a.new_total newTotal,a.difference,a.currency,a.settlement,a.settlement_due_date settlementDueDate,a.changes_json changesJson,a.payment_plan_json paymentPlanJson,u.name createdBy FROM sale_amendments a JOIN users u ON u.id=a.created_by WHERE a.sale_id=? ORDER BY a.id DESC`).all(id) as {changesJson:string;paymentPlanJson:string|null}[])
+    .map(({changesJson,paymentPlanJson,...rest})=>({...rest,changes:JSON.parse(changesJson),paymentPlan:paymentPlanJson?JSON.parse(paymentPlanJson):null}));
   res.json({sale,items,schedule,shipments,returns,amendments});
 });
 
@@ -1634,7 +1771,37 @@ const saleAmendmentSchema = z.object({
   })).min(1),
   settlement: z.enum(["OPEN_ACCOUNT", "BANK_TRANSFER", "CHECK", "PROMISSORY_NOTE"]).default("OPEN_ACCOUNT"),
   settlementDueDate: z.string().date().optional(),
+  // Verilirse kalan (tahsil edilmemiş, evrakı teslim alınmamış) ödeme planı iptal edilip bu planla değiştirilir.
+  // Ör. çekle kapanacak kısım senede veya vadeli havaleye çevrilir. Boş liste: kalan tutar açık cariye kalır.
+  paymentPlan: z.array(z.object({
+    paymentType: z.enum(["BANK_TRANSFER", "CHECK", "PROMISSORY_NOTE"]),
+    dueDate: z.string().date(),
+    amount: z.number().positive(),
+  })).max(24).optional(),
 });
+
+/**
+ * Yeni ödeme planının toplamı: siparişin henüz plana bağlanmamış ödenmemiş kısmı.
+ * Vadeli/çekli siparişte = yeni toplam − peşinat − avans mahsubu − iadeler − değişmeyen vadeler.
+ * Peşin / kredi kartı siparişinde tutar onayda tahsil edildiği için yalnızca açık vadeler + fark planlanır.
+ */
+function paymentPlanTarget(saleId: number, newTotal: number, replacedIds: number[], fallback: number) {
+  const sale = db.prepare("SELECT payment_method paymentMethod,down_payment downPayment,advance_amount advanceAmount FROM sales WHERE id=?").get(saleId) as { paymentMethod: string; downPayment: number; advanceAmount: number };
+  if (["CASH", "CREDIT_CARD"].includes(sale.paymentMethod)) return Number(Math.max(0, fallback).toFixed(2));
+  const returned = (db.prepare("SELECT COALESCE(SUM(grand_total),0) n FROM sale_returns WHERE sale_id=?").get(saleId) as { n: number }).n;
+  const rows = db.prepare("SELECT id,amount FROM payment_schedules WHERE sale_id=? AND sequence_no>0 AND status<>'CANCELLED'").all(saleId) as { id: number; amount: number }[];
+  const fixed = rows.filter((x) => !replacedIds.includes(x.id)).reduce((t, x) => t + x.amount, 0);
+  return Number(Math.max(0, newTotal - sale.downPayment - sale.advanceAmount - returned - fixed).toFixed(2));
+}
+
+/** Revizyonda yeniden planlanabilecek vadeler: ödenmemiş, evrakı henüz teslim alınmamış satırlar. */
+function replaceableSchedules(saleId: number) {
+  return db.prepare(`SELECT ps.id,ps.sequence_no sequenceNo,ps.payment_type paymentType,ps.due_date dueDate,ps.amount,n.id instrumentId,n.number instrumentNumber,n.status instrumentStatus
+    FROM payment_schedules ps LEFT JOIN negotiable_instruments n ON n.payment_schedule_id=ps.id AND n.status<>'CANCELLED'
+    WHERE ps.sale_id=? AND ps.status IN ('PLANNED','INSTRUMENT_CREATED') AND ps.paid_amount<0.005
+      AND ps.payment_type IN ('BANK_TRANSFER','CHECK','PROMISSORY_NOTE') AND (n.id IS NULL OR n.status='PLANNED')
+    ORDER BY ps.sequence_no`).all(saleId) as { id: number; sequenceNo: number; paymentType: string; dueDate: string; amount: number; instrumentId: number | null; instrumentNumber: string | null; instrumentStatus: string | null }[];
+}
 app.post("/api/sales/:id/amendments", allow("ADMIN"), (req, res) => {
   const parsed = saleAmendmentSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ message: parsed.error.issues[0]?.message && parsed.error.issues[0].path.includes("vatRate") ? parsed.error.issues[0].message : "Revizyon tarihi, nedeni ve kalemler zorunludur." });
@@ -1681,8 +1848,20 @@ app.post("/api/sales/:id/amendments", allow("ADMIN"), (req, res) => {
         }),
         ...priced.filter((x) => !x.saleItemId).map((x) => ({ product: x.productName, oldQuantity: 0, newQuantity: x.quantity, oldTotal: 0, newTotal: x.lineTotal })),
       ].filter((c) => c.oldQuantity !== c.newQuantity || Math.abs(c.oldTotal - c.newTotal) >= 0.01);
-      if (!changes.length) throw new Error("Siparişte değişiklik yapılmadı.");
-      if (difference > 0.009 && input.settlement !== "OPEN_ACCOUNT" && !input.settlementDueDate) throw new Error("Fark için vade tarihi seçin.");
+      const replan = input.paymentPlan !== undefined;
+      if (!changes.length && !replan) throw new Error("Siparişte değişiklik yapılmadı.");
+      if (!replan && difference > 0.009 && input.settlement !== "OPEN_ACCOUNT" && !input.settlementDueDate) throw new Error("Fark için vade tarihi seçin.");
+      // Ödeme planı yeniden düzenleniyorsa: iptal edilecek açık vadeler + fark = yeni planın toplamı.
+      const replaced = replan ? replaceableSchedules(saleId) : [];
+      const openTotal = Number(replaced.reduce((t, x) => t + x.amount, 0).toFixed(2));
+      const planTarget = replan ? paymentPlanTarget(saleId, totals.grandTotal, replaced.map((x) => x.id), openTotal + difference) : 0;
+      if (replan) {
+        const plan = input.paymentPlan!;
+        const planTotal = Number(plan.reduce((t, x) => t + x.amount, 0).toFixed(2));
+        if (plan.length && Math.abs(planTotal - planTarget) > 0.01) throw new Error(`Yeni ödeme planının toplamı ${planTarget.toLocaleString("tr-TR", { minimumFractionDigits: 2 })} ${sale.currency} olmalıdır (şu an ${planTotal.toLocaleString("tr-TR", { minimumFractionDigits: 2 })}).`);
+        if (!replaced.length && !plan.length && difference <= 0.009) throw new Error("Değiştirilecek açık ödeme planı yok.");
+        for (const row of plan) if (row.dueDate < input.amendmentDate) throw new Error("Yeni vadeler revizyon tarihinden önce olamaz.");
+      }
 
       // Kalemleri uygula
       const update = db.prepare("UPDATE sale_items SET quantity=?,unit_price=?,vat_rate=?,line_total=? WHERE id=?");
@@ -1696,7 +1875,7 @@ app.post("/api/sales/:id/amendments", allow("ADMIN"), (req, res) => {
       db.prepare("UPDATE sales SET subtotal=?,vat_total=?,grand_total=? WHERE id=?").run(totals.subtotal, totals.vatTotal, totals.grandTotal, saleId);
 
       const inserted = db.prepare(`INSERT INTO sale_amendments (sale_id,amendment_date,reason,previous_total,new_total,difference,currency,exchange_rate,settlement,settlement_due_date,changes_json,created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
-        .run(saleId, input.amendmentDate, input.reason, sale.grandTotal, totals.grandTotal, difference, sale.currency, sale.exchangeRate, difference > 0.009 ? input.settlement : "NONE", difference > 0.009 && input.settlement !== "OPEN_ACCOUNT" ? input.settlementDueDate! : null, JSON.stringify(changes), req.user.id);
+        .run(saleId, input.amendmentDate, input.reason, sale.grandTotal, totals.grandTotal, difference, sale.currency, sale.exchangeRate, replan ? "REPLAN" : difference > 0.009 ? input.settlement : "NONE", !replan && difference > 0.009 && input.settlement !== "OPEN_ACCOUNT" ? input.settlementDueDate! : null, JSON.stringify(changes), req.user.id);
       const amendmentId = Number(inserted.lastInsertRowid);
       const number = `REV-${input.amendmentDate.slice(0, 4)}-${String(amendmentId).padStart(6, "0")}`;
       db.prepare("UPDATE sale_amendments SET number=? WHERE id=?").run(number, amendmentId);
@@ -1706,25 +1885,56 @@ app.post("/api/sales/:id/amendments", allow("ADMIN"), (req, res) => {
         const tryAmount = Number((Math.abs(difference) * sale.exchangeRate).toFixed(2));
         postLedger({ customerId: sale.customerId, type: "SALE_AMENDMENT", date: input.amendmentDate, description: `${sale.number} sipariş revizyonu · ${number}${difference > 0 ? " · ek tutar" : " · tutar düştü"}`, debit: difference > 0 ? tryAmount : 0, credit: difference < 0 ? tryAmount : 0, currency: sale.currency, foreignAmount: Math.abs(difference), rate: sale.exchangeRate, sourceType: "SALE_AMENDMENT", sourceId: amendmentId, actorId: req.user.id });
       }
+      const addInstrument = db.prepare(`INSERT INTO negotiable_instruments (number,instrument_type,customer_id,sale_id,payment_schedule_id,due_date,amount,currency,exchange_rate,try_amount,created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?)`);
+      if (replan) {
+        // Eski açık vadeleri ve henüz teslim alınmamış (planlı) evrakları iptal et.
+        for (const row of replaced) {
+          db.prepare("UPDATE payment_schedules SET status='CANCELLED' WHERE id=?").run(row.id);
+          if (row.instrumentId) {
+            db.prepare("UPDATE negotiable_instruments SET status='CANCELLED' WHERE id=?").run(row.instrumentId);
+            db.prepare("INSERT INTO instrument_movements (instrument_id,from_status,to_status,counterparty,movement_date,note,created_by) VALUES (?,'PLANNED','CANCELLED',NULL,?,?,?)").run(row.instrumentId, input.amendmentDate, `${number} ile ödeme planı değişti`, req.user.id);
+          }
+        }
+        let sequence = ((db.prepare("SELECT COALESCE(MAX(sequence_no),0) n FROM payment_schedules WHERE sale_id=?").get(saleId) as { n: number }).n);
+        for (const row of input.paymentPlan!) {
+          sequence += 1;
+          const inserted = db.prepare("INSERT INTO payment_schedules (sale_id,sequence_no,payment_type,due_date,amount,currency,exchange_rate) VALUES (?,?,?,?,?,?,?)")
+            .run(saleId, sequence, row.paymentType, row.dueDate, row.amount, sale.currency, sale.exchangeRate);
+          if (row.paymentType !== "BANK_TRANSFER") {
+            const scheduleId = Number(inserted.lastInsertRowid);
+            addInstrument.run(`EVR-${input.amendmentDate.slice(0, 4)}-${String(saleId).padStart(6, "0")}-${String(sequence).padStart(2, "0")}`, row.paymentType, sale.customerId, saleId, scheduleId, row.dueDate, row.amount, sale.currency, sale.exchangeRate, Number((row.amount * sale.exchangeRate).toFixed(2)), req.user.id);
+            db.prepare("UPDATE payment_schedules SET status='INSTRUMENT_CREATED' WHERE id=?").run(scheduleId);
+          }
+        }
+        // Siparişin ödeme şekli kalan aktif plana göre güncellenir (liste ve formlarda doğru görünsün).
+        const active = db.prepare("SELECT payment_type paymentType FROM payment_schedules WHERE sale_id=? AND sequence_no>0 AND status<>'CANCELLED'").all(saleId) as { paymentType: string }[];
+        const instrumentRows = active.filter((x) => x.paymentType !== "BANK_TRANSFER");
+        const current = db.prepare("SELECT payment_method paymentMethod,down_payment downPayment FROM sales WHERE id=?").get(saleId) as { paymentMethod: string; downPayment: number };
+        if (active.length) {
+          const method = instrumentRows.length ? (current.downPayment > 0 ? "MIXED" : "CHECK") : "TERM";
+          db.prepare("UPDATE sales SET payment_method=?,instrument_type=?,instrument_count=? WHERE id=?").run(method, instrumentRows.length ? instrumentRows[instrumentRows.length - 1].paymentType : null, instrumentRows.length, saleId);
+        }
+        db.prepare("UPDATE sale_amendments SET payment_plan_json=? WHERE id=?").run(JSON.stringify({ replaced: replaced.map(({ paymentType, dueDate, amount, instrumentNumber }) => ({ paymentType, dueDate, amount, instrumentNumber })), plan: input.paymentPlan }), amendmentId);
+      }
       // Artış için ödeme planı: vadeli havale satırı ya da planlı çek/senet.
-      if (difference > 0.009 && input.settlement !== "OPEN_ACCOUNT") {
+      if (!replan && difference > 0.009 && input.settlement !== "OPEN_ACCOUNT") {
         const sequence = ((db.prepare("SELECT COALESCE(MAX(sequence_no),0) n FROM payment_schedules WHERE sale_id=?").get(saleId) as { n: number }).n) + 1;
         const schedule = db.prepare("INSERT INTO payment_schedules (sale_id,sequence_no,payment_type,due_date,amount,currency,exchange_rate) VALUES (?,?,?,?,?,?,?)")
           .run(saleId, sequence, input.settlement, input.settlementDueDate!, difference, sale.currency, sale.exchangeRate);
         if (input.settlement === "CHECK" || input.settlement === "PROMISSORY_NOTE") {
           const scheduleId = Number(schedule.lastInsertRowid);
-          db.prepare(`INSERT INTO negotiable_instruments (number,instrument_type,customer_id,sale_id,payment_schedule_id,due_date,amount,currency,exchange_rate,try_amount,created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+          addInstrument
             .run(`EVR-${input.amendmentDate.slice(0, 4)}-${String(saleId).padStart(6, "0")}-${String(sequence).padStart(2, "0")}`, input.settlement, sale.customerId, saleId, scheduleId, input.settlementDueDate!, difference, sale.currency, sale.exchangeRate, Number((difference * sale.exchangeRate).toFixed(2)), req.user.id);
           db.prepare("UPDATE payment_schedules SET status='INSTRUMENT_CREATED' WHERE id=?").run(scheduleId);
         }
       }
       if (sale.createdBy !== req.user.id)
-        db.prepare("INSERT INTO notifications (user_id,title,message,link) VALUES (?,?,?,?)").run(sale.createdBy, "Sipariş revize edildi", `${sale.number}: ${input.reason}`, `/satislar/${saleId}`);
+        notifyUser(sale.createdBy, "Sipariş revize edildi", `${sale.number} · ${saleCustomerName(saleId)}: ${input.reason} (${req.user.name})`, `/satislar/${saleId}`);
       audit(req.user.id, "SALE_AMENDED", "sale", saleId, { grandTotal: sale.grandTotal, items: existing }, { number, ...input, grandTotal: totals.grandTotal, difference, changes }, req.ip, req.correlationId);
-      return { number, difference, newTotal: totals.grandTotal, currency: sale.currency };
+      return { number, difference, newTotal: totals.grandTotal, currency: sale.currency, replanned: replan };
     });
     const amount = Math.abs(result.difference).toLocaleString("tr-TR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    res.status(201).json({ ...result, message: `${result.number} kaydedildi. ${Math.abs(result.difference) < 0.01 ? "Sipariş tutarı değişmedi." : result.difference > 0 ? `Fark ${amount} ${result.currency} cariye borç olarak işlendi.` : `Fark ${amount} ${result.currency} cariye alacak (avans) olarak işlendi.`}` });
+    res.status(201).json({ ...result, message: `${result.number} kaydedildi. ${Math.abs(result.difference) < 0.01 ? "Sipariş tutarı değişmedi." : result.difference > 0 ? `Fark ${amount} ${result.currency} cariye borç olarak işlendi.` : `Fark ${amount} ${result.currency} cariye alacak (avans) olarak işlendi.`}${result.replanned ? " Ödeme planı yenilendi." : ""}` });
   } catch (error) {
     res.status(400).json({ message: error instanceof Error ? error.message : "Revizyon kaydedilemedi." });
   }
@@ -1779,6 +1989,46 @@ app.post("/api/sales/:id/returns", allow("ADMIN"), (req, res) => {
 });
 
 // Makine sipariş raporu: hangi cariye/bayiye hangi modelden kaç adet sipariş verildiği.
+// Evraksız alacaklar: borcu olan (pozitif bakiyeli) bayi/perakende cariler ve bu borcun
+// hangi kısmının vadeli havale, henüz teslim alınmamış çek/senet ya da plansız açık cari olduğu.
+app.get("/api/reports/unbacked", (_req, res) => {
+  const today = istanbulToday();
+  const customers = db.prepare(`SELECT c.id,c.code,c.name,c.city,c.phone,c.balance,
+      (SELECT GROUP_CONCAT(tag) FROM customer_tags ct WHERE ct.customer_id=c.id) tags,
+      (SELECT MAX(COALESCE(s.order_date,date(s.created_at))) FROM sales s WHERE s.customer_id=c.id AND s.status IN ('APPROVED','COMPLETED')) lastOrderDate
+    FROM customers c WHERE c.active=1 AND c.balance>0.009
+      AND EXISTS (SELECT 1 FROM customer_tags ct WHERE ct.customer_id=c.id AND ct.tag IN ('CUSTOMER','DEALER'))
+    ORDER BY c.balance DESC`).all() as { id: number; code: string; name: string; city: string | null; phone: string | null; balance: number; tags: string; lastOrderDate: string | null }[];
+  // Açık vadeler: tahsil edilmemiş havale vadeleri ve teslim alınmamış (planlı) çek/senetler.
+  const items = db.prepare(`SELECT s.customer_id customerId,s.id saleId,s.number saleNumber,ps.payment_type paymentType,ps.due_date dueDate,
+      ROUND(ps.amount-ps.paid_amount,2) remaining,ps.currency,ps.exchange_rate exchangeRate,n.number instrumentNumber,n.status instrumentStatus
+    FROM payment_schedules ps JOIN sales s ON s.id=ps.sale_id LEFT JOIN negotiable_instruments n ON n.payment_schedule_id=ps.id AND n.status<>'CANCELLED'
+    WHERE s.status IN ('APPROVED','COMPLETED') AND ps.payment_type<>'CASH' AND ps.status NOT IN ('PAID','CANCELLED') AND ps.amount-ps.paid_amount>0.009
+      AND (ps.payment_type='BANK_TRANSFER' OR n.id IS NULL OR n.status='PLANNED')
+    ORDER BY ps.due_date,ps.id`).all() as { customerId: number; saleId: number; saleNumber: string; paymentType: string; dueDate: string; remaining: number; currency: string; exchangeRate: number; instrumentNumber: string | null; instrumentStatus: string | null }[];
+  const byCustomer = new Map<number, typeof items>();
+  for (const item of items) byCustomer.set(item.customerId, [...(byCustomer.get(item.customerId) || []), item]);
+  const rows = customers.map((c) => {
+    const open = byCustomer.get(c.id) || [];
+    const tryOf = (x: (typeof items)[number]) => Number((x.remaining * x.exchangeRate).toFixed(2));
+    const transfers = open.filter((x) => x.paymentType === "BANK_TRANSFER").reduce((t, x) => t + tryOf(x), 0);
+    const instruments = open.filter((x) => x.paymentType !== "BANK_TRANSFER").reduce((t, x) => t + tryOf(x), 0);
+    const overdue = open.filter((x) => x.dueDate < today).reduce((t, x) => t + tryOf(x), 0);
+    const planned = transfers + instruments;
+    return {
+      ...c,
+      plannedTransfers: Number(transfers.toFixed(2)),
+      pendingInstruments: Number(instruments.toFixed(2)),
+      unplanned: Number(Math.max(0, c.balance - planned).toFixed(2)),
+      overdue: Number(Math.min(overdue, c.balance).toFixed(2)),
+      oldestDueDate: open[0]?.dueDate || null,
+      items: open.map((x) => ({ ...x, tryAmount: tryOf(x), overdue: x.dueDate < today })),
+    };
+  });
+  const sum = (key: "balance" | "plannedTransfers" | "pendingInstruments" | "unplanned" | "overdue") => Number(rows.reduce((t, r) => t + r[key], 0).toFixed(2));
+  res.json({ today, rows, totals: { balance: sum("balance"), plannedTransfers: sum("plannedTransfers"), pendingInstruments: sum("pendingInstruments"), unplanned: sum("unplanned"), overdue: sum("overdue"), customers: rows.length } });
+});
+
 app.get("/api/reports/machine-orders", (req, res) => {
   const today = new Date().toISOString().slice(0, 10);
   const from = typeof req.query.from === "string" && /^\d{4}-\d{2}-\d{2}$/.test(req.query.from) ? req.query.from : `${today.slice(0, 4)}-01-01`;
@@ -2007,6 +2257,7 @@ app.post("/api/sales/:id/submit", allow("SALES", "ADMIN"), (req, res) => {
         created_by: number;
         number: string;
         grand_total: number;
+        currency: string;
         approval_assignee_id:number|null;
       }
     | undefined;
@@ -2045,12 +2296,10 @@ app.post("/api/sales/:id/submit", allow("SALES", "ADMIN"), (req, res) => {
         `INSERT INTO approvals (entity_type, entity_id, requested_by, assigned_to) VALUES ('SALE', ?, ?, ?)`,
       )
       .run(id, req.user.id, manager.id);
-    db.prepare(
-      `INSERT INTO notifications (user_id, title, message, link) VALUES (?, ?, ?, ?)`,
-    ).run(
+    notifyUser(
       manager.id,
-      "Yeni satış onayı",
-      `${sale.number} numaralı ${sale.grand_total.toLocaleString("tr-TR")} TL satış onayınızı bekliyor.`,
+      "Sipariş onayınızı bekliyor",
+      `${sale.number} numaralı ${saleCustomerName(id)} siparişi (${moneyText(sale.grand_total, sale.currency)}) ${req.user.name} tarafından onaya gönderildi.`,
       "/onaylar",
     );
     audit(
@@ -2251,17 +2500,16 @@ app.post("/api/approvals/:id/decision", allow("ADMIN"), (req, res) => {
     }
     const title =
       parsed.data.decision === "APPROVED"
-        ? "Satış onaylandı"
+        ? "Sipariş onaylandı"
         : parsed.data.decision === "REJECTED"
-          ? "Satış reddedildi"
-          : "Satış için düzeltme istendi";
-    db.prepare(
-      "INSERT INTO notifications (user_id,title,message,link) VALUES (?,?,?,?)",
-    ).run(
+          ? "Sipariş reddedildi"
+          : "Sipariş için düzeltme istendi";
+    const decided = db.prepare("SELECT number FROM sales WHERE id=?").get(approval.entity_id) as { number: string } | undefined;
+    notifyUser(
       approval.requested_by,
       title,
-      parsed.data.reason ?? "İşlem yönetici tarafından onaylandı.",
-      "/satislar",
+      `${decided?.number || "Sipariş"} · ${saleCustomerName(approval.entity_id)}: ${parsed.data.reason ?? "İşlem yönetici tarafından onaylandı."} (${req.user.name})`,
+      `/satislar/${approval.entity_id}`,
     );
     audit(
       req.user.id,
@@ -2533,7 +2781,7 @@ app.get(
     CAST(julianday(n.due_date)-julianday(date('now')) AS INTEGER) daysToDue,
     r.receipt_date collectionDate,r.exchange_rate collectionRate,r.try_amount collectedTryAmount,
     CASE WHEN r.id IS NULL THEN NULL ELSE ROUND(n.amount*(r.exchange_rate-n.exchange_rate),2) END exchangeDifference,
-    c.name customerName,s.number saleNumber FROM negotiable_instruments n JOIN customers c ON c.id=n.customer_id
+    c.name customerName,s.id saleId,s.number saleNumber FROM negotiable_instruments n JOIN customers c ON c.id=n.customer_id
     LEFT JOIN sales s ON s.id=n.sale_id
     LEFT JOIN payment_schedules ps ON ps.id=n.payment_schedule_id
     LEFT JOIN receipts r ON r.id=(SELECT MAX(r2.id) FROM receipts r2 WHERE r2.payment_schedule_id=n.payment_schedule_id AND r2.status='COMPLETED')

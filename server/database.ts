@@ -455,6 +455,22 @@ export function migrate() {
   addColumn('customers', 'note', 'TEXT')
   addColumn('customers', 'district', 'TEXT')
   addColumn('customers', 'address', 'TEXT')
+  addColumn('customers', 'tax_office', 'TEXT')
+  // Siparişte tek seferlik yazılan, katalogda görünmeyen ürün (ör. "Römork 5 ton, 5 lastikli").
+  addColumn('products', 'is_custom', 'INTEGER NOT NULL DEFAULT 0')
+  // Açılış bakiyesi (devir) düzeltmeleri: muhasebe kaydı değiştirilmez, fark ayrı satırla işlenir.
+  db.exec(`CREATE TABLE IF NOT EXISTS opening_balance_adjustments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    customer_id INTEGER NOT NULL REFERENCES customers(id),
+    adjustment_date TEXT NOT NULL,
+    previous_amount REAL NOT NULL,
+    new_amount REAL NOT NULL,
+    currency TEXT NOT NULL,
+    exchange_rate REAL NOT NULL,
+    reason TEXT NOT NULL,
+    created_by INTEGER NOT NULL REFERENCES users(id),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`)
   addColumn('sales', 'card_installments', 'INTEGER')
   // Sipariş tarihi: geçmiş tarihli sipariş girilebilsin diye kayıt zamanından (created_at) ayrı tutulur.
   addColumn('sales', 'order_date', 'TEXT')
@@ -478,6 +494,8 @@ export function migrate() {
     created_by INTEGER NOT NULL REFERENCES users(id),
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`)
+  // Revizyonda ödeme planı yeniden düzenlendiyse eski/yeni plan özeti.
+  addColumn('sale_amendments', 'payment_plan_json', 'TEXT')
 
   // Sipariş iadeleri: sevk edilmiş ürünlerin geri alınması ve cariye alacak kaydı.
   db.exec(`CREATE TABLE IF NOT EXISTS sale_returns (

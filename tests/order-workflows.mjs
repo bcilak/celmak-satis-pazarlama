@@ -261,9 +261,117 @@ try {
  assert.equal(await checksBalance(),-2500000,'Karşılıksız çek avansı azaltmalı');
  history=await request(admin,`/receipts/check-advances?customerId=${checksCustomer.id}`);
  assert.equal(history[0].checks[0].status,'COLLECTED');assert.equal(history[0].checks[1].status,'BOUNCED');
+
+ // ---- Katalog dışı ürün, e-posta bildirimleri, ödeme planı revizyonu, avans düzeltme, evraksız rapor ----
+ // Uygulama içi bildirimler: onaya gönderilen sipariş yöneticiye, sonuç siparişi girene düşer.
+ let adminBell=await request(admin,'/notifications');
+ assert.ok(adminBell.items.some(n=>/onayınızı bekliyor/.test(n.title)&&n.link==='/onaylar'),'Onaya gönderilen sipariş yöneticiye bildirilmeli');
+ let salesBell=await request(sales,'/notifications');
+ assert.ok(salesBell.items.some(n=>n.title==='Sipariş onaylandı'&&/^\/satislar\/\d+$/.test(n.link)),'Onay sonucu siparişi girene bildirilmeli');
+ assert.ok(salesBell.unread>0);
+ await request(sales,'/notifications/read','POST',{ids:[salesBell.items[0].id]});
+ assert.equal((await request(sales,'/notifications')).unread,salesBell.unread-1);
+ await request(sales,'/notifications/read','POST',{});
+ assert.equal((await request(sales,'/notifications')).unread,0);
+ const adminUnreadItem=adminBell.items.find(n=>!n.readAt);assert.ok(adminUnreadItem);
+ await request(sales,'/notifications/read','POST',{ids:[adminUnreadItem.id]});
+ assert.equal((await request(admin,'/notifications')).unread,adminBell.unread,'Başkasının bildirimi işaretlenemez');
+ const custom=await request(sales,'/products/custom','POST',{name:'Römork 5 ton, 5 lastikli',orderKind:'MACHINE',vatRate:10},201);
+ assert.match(custom.code,/^OZL-/);assert.equal(custom.isCustom,1);
+ await request(sales,'/products/custom','POST',{name:'xy',orderKind:'MACHINE',vatRate:10},400);
+ assert.ok(!(await request(sales,'/products')).some(p=>p.id===custom.id),'Katalog dışı ürün katalogda görünmemeli');
+ const customBuyer=await request(sales,'/customers','POST',{name:'Özel Ürün Bayi',tags:['DEALER']},201);
+ const customOrder=await request(sales,'/sales','POST',{customerId:customBuyer.id,orderKind:'MACHINE',advanceAmount:0,paymentMethod:'TERM',paymentTermDays:30,downPayment:0,currency:'TRY',exchangeRate:1,approvalAssigneeId:manager.id,items:[{productId:custom.id,quantity:2,unitPrice:220000,vatRate:10}],paymentSchedule:[{dueDate:'2027-01-31',amount:440000}]},201);
+ let customDetail=await request(admin,`/sales/${customOrder.id}/detail`);
+ assert.equal(customDetail.items[0].name,'Römork 5 ton, 5 lastikli');assert.equal(customDetail.items[0].isCustom,1);assert.equal(customOrder.grandTotal,440000);
+ const pendingBefore=(await request(admin,'/notifications')).pendingApprovals;
+ await request(sales,`/sales/${customOrder.id}/submit`,'POST');approval=await approvalFor(customOrder.id);
+ assert.equal((await request(admin,'/notifications')).pendingApprovals,pendingBefore+1,'Bekleyen onay sayısı artmalı');
+ await request(admin,`/approvals/${approval.id}/decision`,'POST',{decision:'APPROVED'});
+ assert.equal((await request(admin,'/notifications')).pendingApprovals,pendingBefore);
+
+ // Evraksız (açık hesap) satış + peşinat: peşinat onayda cariden düşer, kalan iki vadeye bölünür.
+ const termBuyer=await request(sales,'/customers','POST',{name:'Peşinatlı Açık Hesap Bayi',tags:['DEALER']},201);
+ const termOrder=await request(sales,'/sales','POST',{customerId:termBuyer.id,orderKind:'MACHINE',advanceAmount:0,paymentMethod:'TERM',paymentTermDays:60,downPayment:100000,currency:'TRY',exchangeRate:1,approvalAssigneeId:manager.id,items:[{productId:custom.id,quantity:1,unitPrice:400000,vatRate:10}],paymentSchedule:[{dueDate:'2027-01-15',amount:150000},{dueDate:'2027-02-15',amount:150000}]},201);
+ await request(sales,'/sales','POST',{customerId:termBuyer.id,orderKind:'MACHINE',advanceAmount:0,paymentMethod:'TERM',paymentTermDays:60,downPayment:100000,currency:'TRY',exchangeRate:1,approvalAssigneeId:manager.id,items:[{productId:custom.id,quantity:1,unitPrice:400000,vatRate:10}],paymentSchedule:[{dueDate:'2027-01-15',amount:400000}]},400);
+ await request(sales,`/sales/${termOrder.id}/submit`,'POST');approval=await approvalFor(termOrder.id);
+ await request(admin,`/approvals/${approval.id}/decision`,'POST',{decision:'APPROVED'});
+ assert.equal((await request(admin,`/customers/${termBuyer.id}/ledger`)).customer.balance,300000,'Peşinat düşülmüş kalan borç');
+ const termDetail=await request(admin,`/sales/${termOrder.id}/detail`);
+ assert.deepEqual(termDetail.schedule.map(x=>[x.sequenceNo,x.amount]),[[0,100000],[1,150000],[2,150000]]);
+ const termRow=(await request(admin,'/reports/unbacked')).rows.find(r=>r.id===termBuyer.id);
+ assert.equal(termRow.plannedTransfers,300000);assert.equal(termRow.unplanned,0);
+
+ // Ödeme şekli değişikliği: revizyon siparişinin kalan planı (havale + planlı çek) iki senede çevrilir.
+ revDetail=await request(admin,`/sales/${revOrder.id}/detail`);
+ const oldCheck=(await request(admin,'/instruments')).find(x=>x.saleNumber===revOrder.number&&x.status==='PLANNED');
+ const currentLines=revDetail.items.map(x=>({saleItemId:x.id,productId:x.productId,quantity:x.quantity,unitPrice:Number((x.lineTotal/x.quantity).toFixed(2)),vatRate:x.vatRate}));
+ const balanceBefore=await revBalance();
+ await request(admin,`/sales/${revOrder.id}/amendments`,'POST',amendBody(currentLines,{paymentPlan:[{paymentType:'PROMISSORY_NOTE',dueDate:'2027-02-15',amount:400000}]}),400);
+ const replanned=await request(admin,`/sales/${revOrder.id}/amendments`,'POST',amendBody(currentLines,{paymentPlan:[{paymentType:'PROMISSORY_NOTE',dueDate:'2027-02-15',amount:500000},{paymentType:'PROMISSORY_NOTE',dueDate:'2027-03-15',amount:500000}]}),201);
+ assert.equal(replanned.difference,0);assert.match(replanned.message,/Ödeme planı yenilendi/);
+ assert.equal(await revBalance(),balanceBefore,'Yalnızca ödeme şekli değişince cari bakiye değişmemeli');
+ revDetail=await request(admin,`/sales/${revOrder.id}/detail`);
+ assert.deepEqual(revDetail.schedule.filter(x=>x.sequenceNo>0).map(x=>[x.paymentType,x.amount,x.instrumentStatus]),[['PROMISSORY_NOTE',500000,'PLANNED'],['PROMISSORY_NOTE',500000,'PLANNED']]);
+ assert.equal(revDetail.sale.paymentMethod,'CHECK');assert.equal(revDetail.amendments[0].settlement,'REPLAN');assert.equal(revDetail.amendments[0].paymentPlan.replaced.length,2);
+ const afterInstruments=await request(admin,'/instruments');
+ assert.equal(afterInstruments.find(x=>x.id===oldCheck.id).status,'CANCELLED','Eski planlı çek iptal edilmeli');
+ assert.equal(afterInstruments.filter(x=>x.saleNumber===revOrder.number&&x.status==='PLANNED'&&x.instrumentType==='PROMISSORY_NOTE').length,2);
+ assert.ok(afterInstruments.every(x=>x.saleNumber!==revOrder.number||x.saleId===revOrder.id),'Evrak listesinde sipariş kimliği olmalı');
+ // Teslim alınan senet yeniden planlamada değişmez.
+ const firstNote=afterInstruments.find(x=>x.saleNumber===revOrder.number&&x.status==='PLANNED'&&x.dueDate==='2027-02-15');
+ await request(admin,`/instruments/${firstNote.id}`,'PUT',{issuer:'Revizyon Bayi',serialNumber:'SN-1',bankName:'',issueDate:'2026-11-15'});
+ await request(admin,`/instruments/${firstNote.id}/movements`,'POST',{status:'IN_PORTFOLIO',movementDate:'2026-11-16'});
+ const toTransfer=await request(admin,`/sales/${revOrder.id}/amendments`,'POST',amendBody(currentLines,{paymentPlan:[{paymentType:'BANK_TRANSFER',dueDate:'2027-04-01',amount:500000}]}),201);
+ revDetail=await request(admin,`/sales/${revOrder.id}/detail`);
+ assert.deepEqual(revDetail.schedule.filter(x=>x.sequenceNo>0).map(x=>x.paymentType).sort(),['BANK_TRANSFER','PROMISSORY_NOTE']);
+ assert.equal(revDetail.sale.paymentMethod,'CHECK');assert.ok(toTransfer.number);
+ assert.ok((await request(sales,'/notifications')).items.some(n=>n.title==='Sipariş revize edildi'&&n.link===`/satislar/${revOrder.id}`),'Revizyon siparişi girene bildirilmeli');
+
+ // Avans düzeltme: yanlış girilen avans ters kayıt + doğru kayıtla düzeltilir; iptal edilebilir.
+ const advCustomer=await request(sales,'/customers','POST',{name:'Avans Düzeltme Bayi',tags:['DEALER']},201);
+ const advBalance=async()=>(await request(admin,`/customers/${advCustomer.id}/ledger`)).customer.balance;
+ const wrong=await request(admin,'/receipts','POST',{customerId:advCustomer.id,method:'BANK_TRANSFER',receiptDate:'2026-11-10',amount:25000,currency:'TRY',exchangeRate:1,reference:'DEK-1'},201);
+ assert.equal(await advBalance(),-25000);
+ await request(sales,`/receipts/${wrong.id}`,'PUT',{method:'BANK_TRANSFER',receiptDate:'2026-11-10',amount:250000,exchangeRate:1,reason:'Tutar eksik girildi'},403);
+ await request(admin,`/receipts/${wrong.id}`,'PUT',{method:'BANK_TRANSFER',receiptDate:'2026-11-10',amount:250000,exchangeRate:1},400);
+ const fixed=await request(admin,`/receipts/${wrong.id}`,'PUT',{method:'BANK_TRANSFER',receiptDate:'2026-11-10',amount:250000,exchangeRate:1,reference:'DEK-1',reason:'Tutar eksik girildi'});
+ assert.equal(await advBalance(),-250000,'Düzeltilen avans bakiyeye doğru yansımalı');
+ await request(admin,`/receipts/${wrong.id}`,'PUT',{method:'BANK_TRANSFER',receiptDate:'2026-11-10',amount:1,exchangeRate:1,reason:'Tekrar'},404);
+ let advLedger=await request(admin,`/customers/${advCustomer.id}/ledger`);
+ assert.deepEqual(advLedger.advanceReceipts.map(r=>[r.number,r.amount]),[[fixed.number,250000]]);
+ assert.ok(advLedger.transactions.some(t=>t.transactionType==='RECEIPT_REVERSAL'&&t.debit===25000));
+ await request(admin,`/receipts/${fixed.id}/reverse`,'POST',{reason:'Mükerrer giriş'});
+ assert.equal(await advBalance(),0);
+ // Açılış bakiyesi (devir) düzeltmesi: BEREKET TARIM avansı 15.580.325,33 → 15.000.000.
+ let bereketLedger=await request(admin,`/customers/${bereket.id}/ledger`);
+ assert.equal(bereketLedger.opening.amount,-15580325.33);
+ await request(sales,`/customers/${bereket.id}/opening-balance`,'PUT',{amount:-15000000,date:'2026-11-17',reason:'Mutabakat'},403);
+ await request(admin,`/customers/${bereket.id}/opening-balance`,'PUT',{amount:-15580325.33,date:'2026-11-17',reason:'Aynı'},400);
+ await request(admin,`/customers/${bereket.id}/opening-balance`,'PUT',{amount:-15000000,date:'2026-11-17',reason:'Mutabakat sonrası düzeltme'});
+ bereketLedger=await request(admin,`/customers/${bereket.id}/ledger`);
+ assert.equal(bereketLedger.customer.balance,-15000000);assert.equal(bereketLedger.opening.amount,-15000000);
+ assert.ok(bereketLedger.transactions.some(t=>t.transactionType==='OPENING_BALANCE_ADJUSTMENT'&&t.debit===580325.33));
+ await request(admin,`/customers/${advCustomer.id}/opening-balance`,'PUT',{amount:-5,date:'2026-11-17',reason:'Yok'},404);
+ // Döviz cinsinden açılış: düzeltme aynı kurla işlenir.
+ await request(admin,`/customers/${eur.created[0].id}/opening-balance`,'PUT',{amount:30000,date:'2026-11-17',reason:'Kur düzeltmesi değil, tutar'});
+ assert.equal((await request(admin,`/customers/${eur.created[0].id}/ledger`)).customer.balance,1500000);
+
+ // Evraksız alacak raporu: borçlu bayiler; vadeli havale, teslim alınmamış evrak ve plansız açık cari ayrımı.
+ const unbacked=await request(sales,'/reports/unbacked');
+ const revRow=unbacked.rows.find(r=>r.id===revCustomer.id);
+ assert.ok(revRow,'Borcu olan bayi raporda olmalı');
+ assert.equal(revRow.balance,await revBalance());
+ assert.equal(revRow.plannedTransfers,500000);assert.equal(revRow.pendingInstruments,0,'Teslim alınan senet evraksız sayılmamalı');
+ assert.ok(revRow.items.every(i=>i.saleId===revOrder.id));
+ const customRow=unbacked.rows.find(r=>r.id===customBuyer.id);assert.equal(customRow.plannedTransfers,440000);assert.equal(customRow.unplanned,0);
+ assert.ok(!unbacked.rows.some(r=>r.id===bereket.id),'Avanslı cari evraksız alacakta görünmemeli');
+ const mirayRow=unbacked.rows.find(r=>r.id===balanceTarget.id);assert.equal(mirayRow.unplanned,276000,'Devir borcu plansız açık cari sayılmalı');
+ assert.equal(unbacked.totals.customers,unbacked.rows.length);
  console.log('PASS: eşit olmayan 4 çek, hedef/toplam farkı, grup kaydı, mükerrer/tekrar istek koruması, atomik geri alma, tahsilat ve karşılıksız çek bakiyesi');
  console.log('PASS: parça siparişi, düzenleme, revizyon, onay, 2 milyon avans, makine/parça mahsup, kısmi avans, mükerrer ve yetersiz bakiye kontrolleri');
  console.log('PASS: KDV dahil fiyat, 0/10/20 KDV kısıtı, kredi kartı tahsilatı, iade (sevk/yetki/miktar kontrolleri), makine raporu, cari notu, Excel ile toplu cari, cari düzenleme ve silme, açılış bakiyesi (devir), kullanıcı yönetimi ve parola değiştirme, geçmiş tarihli sipariş, onaylı sipariş revizyonu');
+ console.log('PASS: katalog dışı ürün, peşinatlı açık hesap satış, uygulama içi bildirimler (okundu, bekleyen onay sayısı), ödeme şekli değişikliği (çek → senet → havale), avans ve açılış bakiyesi düzeltme, evraksız alacak raporu');
 } finally {
  server.kill();await new Promise(r=>server.once('exit',r));
  assert.equal(dirname(resolve(dataDir)),resolve(tmpdir()));

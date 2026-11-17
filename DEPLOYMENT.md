@@ -99,9 +99,9 @@ HTTPS sertifikası:
 
 - **Tüm başlangıç/demo parolalarını değiştirin.** `Celmak!2026` ortak demo
   parolası ve demo hesaplar canlıya taşınmamalıdır.
-- **Parola sıfırlama e-postası henüz bağlı değildir:** şu an sıfırlama bağlantısı
-  uygulama loguna (`docker compose logs`) yazılır. Gerçek kullanım için bir SMTP/
-  e-posta sağlayıcısı eklenmesi planlanmalıdır.
+- **Bildirimler uygulama içindedir:** onaya gönderilen sipariş, onay/ret/düzeltme
+  sonucu ve revizyonlar üst çubuktaki bildirim zilinde görünür; e-posta gönderilmez.
+  Parola sıfırlama bağlantısı uygulama loguna (`docker compose logs`) yazılır.
 - **`celmak-data` volume'ünü düzenli yedekleyin** — tüm veri oradaki `celmak.db`
   dosyasındadır.
 

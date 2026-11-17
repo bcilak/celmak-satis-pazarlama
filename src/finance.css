@@ -64,7 +64,8 @@
 .approval-picker { margin-top: 16px; background: #f4f8f6; padding: 13px; border-radius: 10px; }
 .approval-picker small { color: #6d7974; }
 .sale-detail-link { color: #174f42; font-weight: 800; text-decoration: none; }
-.sale-detail-grid { display: grid; grid-template-columns: 1fr 330px; gap: 15px; margin-bottom: 15px; }
+.sale-detail-grid { display: grid; grid-template-columns: minmax(0,1fr) 330px; gap: 15px; margin-bottom: 15px; }
+@media(max-width:1180px){.sale-detail-grid{grid-template-columns:minmax(0,1fr)}}
 .sale-financial-summary { padding-bottom: 20px; }
 .sale-financial-summary>p { display:flex; justify-content:space-between; padding:8px 20px; margin:0; font-size:12px; }
 .sale-financial-summary>p.grand { border-block:1px solid #e4eae7; padding-block:14px; }

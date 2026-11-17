@@ -44,6 +44,10 @@ import {
 import { api } from "./api";
 import { CheckAdvanceForm, CheckAdvanceHistory } from "./CheckAdvances";
 import { CustomerImport } from "./CustomerImport";
+import { CustomerPicker } from "./CustomerPicker";
+import { UnbackedReport } from "./UnbackedReport";
+import { NotificationBell } from "./NotificationBell";
+import { AdvanceCorrections, type AdvanceReceipt, type OpeningBalance } from "./AdvanceCorrections";
 import { OpeningBalanceImport } from "./OpeningBalanceImport";
 import { ForcedPasswordChange, PasswordChangeForm, TemporaryPasswordForm, UserForm } from "./UserManagement";
 import {
@@ -206,6 +210,8 @@ function App() {
   } | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
+  // Kullanıcıya atanmış bekleyen onay sayısı: bildirim zili yeniler, Onaylar menüsünde rozet olarak görünür.
+  const [pendingApprovals, setPendingApprovals] = useState(0);
   const loadSession = useCallback(
     () =>
       api<{ currentUser: User; users: User[] }>("/session")
@@ -255,7 +261,7 @@ function App() {
           </div>
         </div>
         <nav>
-          {menu.filter(([permission])=>can(permission)).map(([,to,label,icon])=><SideLink key={to} to={to} icon={icon} label={label} close={()=>setMobileOpen(false)}/>)}
+          {menu.filter(([permission])=>can(permission)).map(([,to,label,icon])=><SideLink key={to} to={to} icon={icon} label={label} badge={to==="/onaylar"&&pendingApprovals>0?String(pendingApprovals):undefined} close={()=>setMobileOpen(false)}/>)}
         </nav>
         <div className="sidebar-foot">
           <ShieldCheck />
@@ -276,6 +282,7 @@ function App() {
           </button>
           <div className="top-context"><b>Çelmak çalışma alanı</b><span>Yapmak istediğiniz işlemi sol menüden seçin.</span></div>
           <div className="top-actions">
+            <NotificationBell onPending={setPendingApprovals} />
             <div className="user-select">
               <div className="avatar">
                 {session.currentUser.name
@@ -310,14 +317,15 @@ function App() {
               path="/satislar"
               element={guard("SALES",<Sales user={session.currentUser} />)}
             />
-            <Route path="/satislar/yeni" element={guard("SALES",<NewSale key="new" />)} />
-            <Route path="/satislar/:id/duzenle" element={guard("SALES",<NewSale key="edit" />)} />
+            <Route path="/satislar/yeni" element={guard("SALES",<NewSale key="new" user={session.currentUser} />)} />
+            <Route path="/satislar/:id/duzenle" element={guard("SALES",<NewSale key="edit" user={session.currentUser} />)} />
             <Route path="/yedek-parcalar" element={guard("SALES",<SpareParts user={session.currentUser} />)} />
-            <Route path="/yedek-parcalar/yeni" element={guard("SALES",<NewSale key="spare" spare />)} />
+            <Route path="/yedek-parcalar/yeni" element={guard("SALES",<NewSale key="spare" spare user={session.currentUser} />)} />
             <Route path="/onaylar/siparis/:id" element={guard("APPROVALS",<SaleDetail user={session.currentUser} />)} />
             <Route path="/satislar/:id" element={guard("SALES",<SaleDetail user={session.currentUser} />)} />
             <Route path="/satislar/:id/yazdir" element={guard("SALES",<SalePrint />)} />
             <Route path="/raporlar" element={guard("SALES",<MachineReport />)} />
+            <Route path="/raporlar/evraksiz" element={guard("SALES",<UnbackedReport />)} />
             <Route
               path="/onaylar"
               element={guard("APPROVALS",<Approvals user={session.currentUser} />)}
@@ -600,6 +608,7 @@ function Customers({ user }: { user: User }) {
               {unbackedOnly ? "Tüm carileri göster" : `${unbacked.length} caride evraksız alacak`}
             </button>
           )}
+          {unbacked.length > 0 && user.permissions?.includes("SALES") && <NavLink className="text-btn unbacked-report-link" to="/raporlar/evraksiz">Evraksız alacak raporu <ChevronRight /></NavLink>}
           <span>{shown.length} cari</span>
         </div>
         <div className="customer-grid">
@@ -719,6 +728,10 @@ function NewCustomer() {
             <label className="field">
               <span>Vergi numarası</span>
               <input name="taxNumber" maxLength={11} defaultValue={v?.taxNumber || ""} />
+            </label>
+            <label className="field">
+              <span>Vergi dairesi</span>
+              <input name="taxOffice" maxLength={80} defaultValue={v?.taxOffice || ""} />
             </label>
             <label className="field">
               <span>İl</span>
@@ -1024,6 +1037,7 @@ function CustomerDetail({user}:{user:User}) {
           <section className="panel customer-mini-info">
             <PanelTitle title="Müşteri bilgileri" />
             <p><span>Vergi no</span><b>{c.taxNumber || "—"}</b></p>
+            <p><span>Vergi dairesi</span><b>{c.taxOffice || "—"}</b></p>
             <p><span>Telefon</span><b>{c.phone || "—"}</b></p>
             <p><span>E-posta</span><b>{c.email || "—"}</b></p>
             <p><span>Varsayılan vade</span><b>{c.paymentTermDays} gün</b></p>
@@ -1280,7 +1294,7 @@ function SaleDetail({user}:{user:User}){
   return <><PageHead eyebrow={`${s.customerCode} · ${s.number}`} title={s.customerName} description={`Sipariş tarihi ${dateOnly(s.orderDate || s.createdAt.slice(0, 10))} · ${s.createdBy} tarafından ${formatDate(s.createdAt)} tarihinde girildi.`} action={<NavLink className="primary-btn" to={`/satislar/${s.id}/yazdir`}><Printer/>Sipariş PDF</NavLink>}/>
     {message&&<Toast text={message} close={()=>setMessage("")}/>}
     <div className="sale-detail-grid"><section className="panel"><PanelTitle title="Satılan ürünler"/><div className="table-wrap"><table><thead><tr><th>Ürün</th><th>Miktar</th><th>Birim fiyat (KDV dahil)</th><th>KDV</th><th>Satır toplamı</th></tr></thead><tbody>{data.items.map(x=><tr key={x.id}><td><b>{x.name}</b><small>{[x.model,x.code].filter(Boolean).join(" · ")}</small></td><td>{x.quantity} {x.unit}{x.shippedQuantity>0&&<small>{x.shippedQuantity} sevk edildi{x.returnedQuantity>0?` · ${x.returnedQuantity} iade`:""}</small>}</td><td>{money(x.lineTotal/x.quantity,s.currency)}</td><td>%{x.vatRate}</td><td className="amount">{money(x.lineTotal,s.currency)}</td></tr>)}</tbody></table></div></section><aside className="panel sale-financial-summary"><PanelTitle title="Finansal özet"/><p><span>Ara toplam (KDV hariç)</span><b>{money(s.subtotal,s.currency)}</b></p><p><span>KDV</span><b>{money(s.vatTotal,s.currency)}</b></p><p className="grand"><span>Genel toplam</span><b>{money(s.grandTotal,s.currency)}</b></p><p><span>Yeni peşinat</span><b>{money(s.downPayment,s.currency)}</b></p><p><span>Cari avansından mahsup</span><b>{money(s.advanceAmount,s.currency)}</b></p>{data.returns.length>0&&<p><span>İade edilen</span><b>− {money(data.returns.reduce((sum,r)=>sum+r.grandTotal,0),s.currency)}</b></p>}<p><span>Sipariş notu</span><b>{s.note||"—"}</b></p><p><span>Ödeme şekli</span><b>{method}</b></p><p><span>Onay yetkilisi</span><b>{s.approvalAssignee||"Belirlenmedi"}</b></p><Status value={s.status}/></aside></div>
-    <section className="panel sale-schedule"><PanelTitle title="Ödeme ve vade planı"/>{data.schedule.length?<div className="compact-list">{data.schedule.map(x=><div key={x.sequenceNo}><span><b>{x.sequenceNo===0?"Peşinat":`${x.sequenceNo}. ödeme`} · {paymentTypeLabel(x.paymentType)}</b><small>{dateOnly(x.dueDate)}</small></span><strong>{money(x.amount,x.currency)}<small>{x.paidAmount?`${money(x.paidAmount,x.currency)} ödendi`:"Ödeme bekleniyor"}</small></strong><Status value={x.status}/></div>)}</div>:<p className="info-note pad">{s.paymentMethod==="CREDIT_CARD"?"Kredi kartıyla tahsil edilir; vade planı oluşmaz.":s.paymentMethod==="CASH"?"Peşin tahsil edilir; vade planı oluşmaz.":"Vade planı yok."}</p>}</section>
+    <section className="panel sale-schedule"><div className="panel-title"><h2>Ödeme ve vade planı</h2>{data.schedule.some(x=>x.instrumentId)&&user.permissions?.includes("INSTRUMENTS")&&<NavLink to={`/kiymetli-evrak?siparis=${encodeURIComponent(s.number)}`}>Bu siparişin çek / senetleri <ChevronRight/></NavLink>}</div>{data.schedule.length?<div className="compact-list">{data.schedule.map(x=><div key={x.sequenceNo}><span><b>{x.sequenceNo===0?"Peşinat":`${data.schedule.filter(y=>y.sequenceNo>0&&y.sequenceNo<=x.sequenceNo).length}. ödeme`} · {paymentTypeLabel(x.paymentType)}</b><small>{dateOnly(x.dueDate)}{x.instrumentNumber?` · ${x.instrumentNumber}${x.instrumentStatus==="PLANNED"?" · teslim alınmadı":""}`:""}</small></span><strong>{money(x.amount,x.currency)}<small>{x.paidAmount?`${money(x.paidAmount,x.currency)} ödendi`:"Ödeme bekleniyor"}</small></strong><Status value={x.status}/></div>)}</div>:<p className="info-note pad">{s.paymentMethod==="CREDIT_CARD"?"Kredi kartıyla tahsil edilir; vade planı oluşmaz.":s.paymentMethod==="CASH"?"Peşin tahsil edilir; vade planı oluşmaz.":"Vade planı yok."}</p>}</section>
     <SaleAmendPanel data={data} canAmend={user.role==="ADMIN"} onDone={(text)=>{setMessage(text);load();}}/>
     <SaleReturnPanel data={data} canReturn={user.role==="ADMIN"} onDone={(text)=>{setMessage(text);load();}}/>
   </>;
@@ -1321,7 +1335,7 @@ function SpareParts({user}:{user:User}) {
     </section><section className="panel"><PanelTitle title="Carilerin yedek parça siparişleri"/><SaleTable sales={orders} action={canWrite?submit:undefined}/></section></>;
 }
 
-function NewSale({spare=false}:{spare?:boolean}) {
+function NewSale({spare=false,user}:{spare?:boolean;user:User}) {
   const {id:editId}=useParams();
   const [productSearch,setProductSearch]=useState("");
   const [productPage,setProductPage]=useState(1);
@@ -1360,11 +1374,25 @@ function NewSale({spare=false}:{spare?:boolean}) {
   const [instrumentType, setInstrumentType] = useState("CHECK");
   const [instrumentCount, setInstrumentCount] = useState(1);
   const [termInstallmentCount, setTermInstallmentCount] = useState(1);
+  // Vade planlayıcı: ilk vade kaç gün sonra, vadeler arası kaç gün (evraksız ve çekli satışta ortak).
+  const [planFirstDays, setPlanFirstDays] = useState(30);
+  const [planInterval, setPlanInterval] = useState(30);
   const [paymentSchedule, setPaymentSchedule] = useState([
     { dueDate: addDaysToToday(30), amount: 0 },
   ]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  // Katalog dışı ürün (siparişe özel; kataloğa kaydedilmez).
+  const [customOpen, setCustomOpen] = useState(false);
+  const [customName, setCustomName] = useState("");
+  const [customVat, setCustomVat] = useState(spare ? 20 : 10);
+  const [customBusy, setCustomBusy] = useState(false);
+  // Siparişle birlikte gelen fazla ödeme: avans olarak cariye işlenir, sipariş için kullanılabilir.
+  const canTakeAdvance = ["ADMIN", "ACCOUNTING"].includes(user.role) && !!user.permissions?.includes("RECEIPTS");
+  const [advanceFormOpen, setAdvanceFormOpen] = useState(false);
+  const [advanceForm, setAdvanceForm] = useState({ amount: 0, method: "BANK_TRANSFER", date: istanbulToday(), reference: "" });
+  const [advanceBusy, setAdvanceBusy] = useState(false);
+  const [advanceNotice, setAdvanceNotice] = useState("");
   useEffect(() => {
     Promise.all([
       api<Customer[]>("/customers"),
@@ -1376,8 +1404,12 @@ function NewSale({spare=false}:{spare?:boolean}) {
       setProducts(p);
       setConfig(conf);
       setAssignees(approvers);setApprovalAssigneeId(approvers[0]?.id||0);
-      if(editId) return api<{sale:{customerId:number;status:string;paymentMethod:string;cardInstallments?:number|null;downPayment:number;advanceAmount:number;currency:string;exchangeRate:number;approvalAssigneeId:number;instrumentType:string;orderKind:string;note:string};items:{productId:number;quantity:number;unitPrice:number;vatRate:number;lineTotal:number}[];schedule:{sequenceNo:number;dueDate:string;amount:number}[]}&{sale:{orderDate?:string;createdAt:string}}>(`/sales/${editId}/detail`).then(d=>{
+      if(editId) return api<{sale:{customerId:number;status:string;paymentMethod:string;cardInstallments?:number|null;downPayment:number;advanceAmount:number;currency:string;exchangeRate:number;approvalAssigneeId:number;instrumentType:string;orderKind:string;note:string};items:{productId:number;code:string;name:string;unit:string;partCategory:string;isCustom?:number;quantity:number;unitPrice:number;vatRate:number;lineTotal:number}[];schedule:{sequenceNo:number;dueDate:string;amount:number}[]}&{sale:{orderDate?:string;createdAt:string}}>(`/sales/${editId}/detail`).then(d=>{
         if(!["DRAFT","REVISION_REQUESTED"].includes(d.sale.status)) throw new Error("Bu sipariş düzenlenemez.");
+        // Katalog dışı ürünler katalog listesinde yoktur; siparişteki bilgiden yeniden kurulur.
+        const known=new Set(p.map(x=>x.id));
+        const extra=d.items.filter(i=>!known.has(i.productId)).map(i=>({id:i.productId,code:i.code,name:i.name,unit:i.unit,partCategory:i.partCategory,unitPrice:0,minimumPrice:0,vatRate:i.vatRate,stockQuantity:0,manualPrice:1,stockTracking:0,isCustom:i.isCustom??1}));
+        if(extra.length)setProducts([...p,...extra]);
         setCustomerId(d.sale.customerId);setOrderDate(d.sale.orderDate||d.sale.createdAt.slice(0,10));setPayment(d.sale.paymentMethod);setCardInstallments(d.sale.cardInstallments||1);setDown(d.sale.downPayment);setAdvanceAmount(d.sale.advanceAmount);setCurrency(d.sale.currency);setExchangeRate(d.sale.exchangeRate);setApprovalAssigneeId(d.sale.approvalAssigneeId||approvers[0]?.id||0);setInstrumentType(d.sale.instrumentType||"CHECK");setOrderKind(d.sale.orderKind);setNote(d.sale.note||"");
         // Formda fiyat KDV dahil gösterilir: satır toplamı / miktar.
         setLines(d.items.map(({productId,quantity,vatRate,lineTotal})=>({productId,quantity,unitPrice:Number((lineTotal/quantity).toFixed(2)),vatRate:normalizeVat(vatRate)})));
@@ -1451,27 +1483,50 @@ function NewSale({spare=false}:{spare?:boolean}) {
           ];
     });
   };
+  const addCustomProduct = async () => {
+    setCustomBusy(true);
+    setError("");
+    try {
+      const product = await api<Product>("/products/custom", { method: "POST", body: JSON.stringify({ name: customName.trim(), orderKind, vatRate: customVat }) });
+      setProducts((current) => [...current, product]);
+      if (!lines.length) setPaymentSchedule((current) => [{ ...current[0], amount: 0 }]);
+      setLines((current) => [...current, { productId: product.id, quantity: 1, unitPrice: 0, vatRate: customVat }]);
+      setCustomName("");
+      setCustomOpen(false);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setCustomBusy(false);
+    }
+  };
+  const saveAdvanceReceipt = async () => {
+    if (!customer || advanceForm.amount <= 0) return;
+    setAdvanceBusy(true);
+    setError("");
+    try {
+      await api("/receipts", { method: "POST", body: JSON.stringify({ customerId, method: advanceForm.method, receiptDate: advanceForm.date, amount: advanceForm.amount, currency: "TRY", exchangeRate: 1, reference: advanceForm.reference || undefined, note: "Sipariş girişinde alınan ödeme (avans)" }) });
+      const updated = await api<Customer[]>("/customers");
+      setCustomers(updated);
+      const fresh = updated.find((c) => c.id === customerId);
+      const available = Math.max(0, -(fresh?.balance || 0));
+      const applied = exchangeRate > 0 ? Math.max(0, Math.min(Number((total - down).toFixed(2)), Math.floor(available / exchangeRate * 100) / 100)) : 0;
+      changeAdvance(applied);
+      const left = Math.max(0, available - applied * exchangeRate);
+      setAdvanceNotice(`${money(advanceForm.amount)} cariye avans olarak işlendi. Bu siparişe ${money(applied, currency)} uygulandı${left > 0.009 ? `; ${money(left)} avans hesabında kalacak` : ""}.`);
+      setAdvanceForm({ amount: 0, method: "BANK_TRANSFER", date: istanbulToday(), reference: "" });
+      setAdvanceFormOpen(false);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setAdvanceBusy(false);
+    }
+  };
   const changeCurrency = (value: string) => {
     setCurrency(value);
     setExchangeRate(
       value === "TRY"
         ? 1
         : config.rates.find((r) => r.currency === value)?.rate || 1,
-    );
-  };
-  const rebuildSchedule = (count: number) => {
-    const safeCount = Math.max(1, Math.min(24, count));
-    const remaining = Math.max(0, total - down - advanceAmount);
-    const base = Math.floor((remaining / safeCount) * 100) / 100;
-    setPaymentSchedule(
-      Array.from({ length: safeCount }, (_, index) => ({
-        dueDate:
-          paymentSchedule[index]?.dueDate || addDaysTo(orderDate, 30 * (index + 1)),
-        amount:
-          index === safeCount - 1
-            ? Number((remaining - base * index).toFixed(2))
-            : base,
-      })),
     );
   };
   // Sipariş tarihi değişince vade tarihleri aynı gün sayısı kadar kayar (plan sipariş tarihine göre kurulur).
@@ -1481,7 +1536,25 @@ function NewSale({spare=false}:{spare?:boolean}) {
     setOrderDate(value);
     if (shift) setPaymentSchedule((rows) => rows.map((row) => ({ ...row, dueDate: addDaysTo(row.dueDate, shift) })));
   };
-  const planTotal = paymentSchedule.reduce((sum, row) => sum + row.amount, 0);
+  /** Vadeleri sipariş tarihinden itibaren kurar: ilk vade + eşit aralık, kalan tutar eşit bölünür. */
+  const buildPlan = (count: number, firstDays = planFirstDays, interval = planInterval, downValue = down) => {
+    const n = Math.max(1, Math.min(24, count || 1));
+    const remaining = Math.max(0, Number((total - downValue - advanceAmount).toFixed(2)));
+    const base = Math.floor((remaining / n) * 100) / 100;
+    setPaymentSchedule(Array.from({ length: n }, (_, i) => ({
+      dueDate: addDaysTo(orderDate, firstDays + interval * i),
+      amount: i === n - 1 ? Number((remaining - base * i).toFixed(2)) : base,
+    })));
+  };
+  const planCount = payment === "TERM" ? termInstallmentCount : instrumentCount;
+  const changeDown = (value: number) => {
+    setDown(value);
+    if (["TERM", "CHECK", "MIXED"].includes(payment)) buildPlan(planCount, planFirstDays, planInterval, value);
+  };
+  // Tek vadeli planın tutarı her zaman kalan ödemeye eşittir (ürün/fiyat/peşinat değişince elle düzeltmek gerekmesin).
+  const remainingForPlan = Math.max(0, Number((total - down - advanceAmount).toFixed(2)));
+  const effectiveSchedule = paymentSchedule.length === 1 ? [{ ...paymentSchedule[0], amount: remainingForPlan }] : paymentSchedule;
+  const planTotal = effectiveSchedule.reduce((sum, row) => sum + row.amount, 0);
   const save = async (e: FormEvent) => {
     e.preventDefault();
     setError("");
@@ -1509,7 +1582,7 @@ function NewSale({spare=false}:{spare?:boolean}) {
             ? instrumentCount
             : 0,
           paymentSchedule: total-down-advanceAmount>0.01 && ["CHECK", "MIXED", "TERM"].includes(payment)
-            ? paymentSchedule
+            ? effectiveSchedule
             : undefined,
           note,
           items: lines,
@@ -1551,21 +1624,10 @@ function NewSale({spare=false}:{spare?:boolean}) {
             <div className="section-content">
               <h2>Müşteri seçin</h2>
               <p>Bakiye, vade ve risk bilgileri otomatik getirilecek.</p>
-              <label className="field">
+              <div className="field">
                 <span>Müşteri</span>
-                <select
-                  required
-                  value={customerId}
-                  onChange={(e) => setCustomerId(Number(e.target.value))}
-                >
-                  <option value="">Müşteri seçin…</option>
-                  {customers.map((c) => (
-                    <option value={c.id} key={c.id}>
-                      {c.code} · {c.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
+                <CustomerPicker customers={customers} value={customerId} required onChange={(id) => { setCustomerId(id); setAdvanceAmount(0); setAdvanceNotice(""); }} />
+              </div>
               {customer && (
                 <div className="customer-summary">
                   <div>
@@ -1625,6 +1687,18 @@ function NewSale({spare=false}:{spare?:boolean}) {
               </div>
               {!matchingProducts.length&&<EmptyInline text="Aramanıza uygun ürün bulunamadı."/>}
               <CatalogPager page={pickerPage} total={matchingProducts.length} pageSize={8} onChange={setProductPage}/>
+              <div className="custom-product">
+                {!customOpen ? (
+                  <button type="button" className="mini-btn" onClick={() => { setCustomOpen(true); setCustomName(productSearch); }}><Plus /> Katalogda olmayan ürün ekle</button>
+                ) : (
+                  <div className="custom-product-form">
+                    <label className="field wide"><span>Ürün adı ve özellikleri</span><input autoFocus maxLength={180} value={customName} onChange={(e) => setCustomName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); if (customName.trim().length >= 3) addCustomProduct(); } }} placeholder={orderKind === "MACHINE" ? "Örn. Römork 5 ton, 5 lastikli, damperli" : "Örn. Özel ölçü bıçak 45 cm"} /></label>
+                    <label className="field"><span>KDV</span><select value={customVat} onChange={(e) => setCustomVat(Number(e.target.value))}>{VAT_RATES.map((rate) => <option key={rate} value={rate}>%{rate}</option>)}</select></label>
+                    <div className="head-actions"><button type="button" className="mini-btn" onClick={() => setCustomOpen(false)} disabled={customBusy}>Vazgeç</button><button type="button" className="primary-btn" disabled={customBusy || customName.trim().length < 3} onClick={addCustomProduct}>{customBusy ? "Ekleniyor…" : "Siparişe ekle"}</button></div>
+                    <small className="muted-note">Bu ürün yalnızca bu siparişte, sipariş formunda ve sevkiyatta görünür; ürün kataloğuna eklenmez. Fiyatı aşağıdaki satırda girin.</small>
+                  </div>
+                )}
+              </div>
               {detail.length > 0 && (
                 <div className="selected-lines">
                   {detail.map((l) => (
@@ -1632,7 +1706,7 @@ function NewSale({spare=false}:{spare?:boolean}) {
                       <span>
                         <b>{l.product.name}</b>
                         <small>
-                          {l.product.partCategory==="MACHINE"?`${l.product.manufacturerModel||"Model"} · ${l.product.productGroup}${l.product.productSubgroup?` / ${l.product.productSubgroup}`:""}`:l.product.code}
+                          {l.product.isCustom?"Katalog dışı · yalnızca bu siparişe özel":l.product.partCategory==="MACHINE"?`${l.product.manufacturerModel||"Model"} · ${l.product.productGroup}${l.product.productSubgroup?` / ${l.product.productSubgroup}`:""}`:l.product.code}
                         </small>
                       </span>
                       <label>
@@ -1768,6 +1842,29 @@ function NewSale({spare=false}:{spare?:boolean}) {
                 {invalidAdvance&&<div className="error-box" role="alert">Bu siparişte en fazla {money(maxAdvance,currency)} avans kullanabilirsiniz.</div>}
                 <div className="order-advance-totals"><div><span>Avanstan düşülecek</span><b>{money(advanceAmount,currency)}</b>{currency!=="TRY"&&<small>{money(advanceAmount*exchangeRate)} karşılığı</small>}</div><div><span>Onay sonrası kalan avans (tahmini)</span><b>{money(Math.max(0,availableAdvance-advanceAmount*exchangeRate))}</b></div><div><span>Sipariş için kalan ödeme</span><b>{money(Math.max(0,remainingPayment),currency)}</b></div></div>
                 <small>Düşüm sipariş onaylandığında gerçekleşir. Önceden teslim alınmış çekler için yeniden çek kaydı oluşturulmaz. Bakiye onay sırasında tekrar kontrol edilir.</small>
+                {advanceNotice && <div className="toast inline-toast" role="status"><CheckCircle2 />{advanceNotice}</div>}
+                {customerId > 0 && canTakeAdvance && (!advanceFormOpen ? (
+                  <button type="button" className="mini-btn add-advance-btn" onClick={() => { setAdvanceFormOpen(true); setAdvanceNotice(""); }}><Plus /> Ödeme geldi: avans ekle</button>
+                ) : (
+                  <div className="add-advance-form">
+                    <b>Bayiden gelen ödemeyi avans olarak kaydedin</b>
+                    <p>Ödeme hemen cariye işlenir. Sipariş tutarı kadarı bu siparişe uygulanır; fazlası avans hesabında kalır ve sonraki siparişlerde kullanılır.</p>
+                    <div className="form-grid">
+                      <label className="field"><span>Gelen tutar (TL)</span><MoneyInput currency="TRY" value={advanceForm.amount} onChange={(amount) => setAdvanceForm({ ...advanceForm, amount })} /></label>
+                      <label className="field"><span>Ödeme şekli</span><select value={advanceForm.method} onChange={(e) => setAdvanceForm({ ...advanceForm, method: e.target.value })}><option value="BANK_TRANSFER">Havale / EFT</option><option value="CASH">Nakit</option></select></label>
+                      <label className="field"><span>Ödeme tarihi</span><input type="date" max={istanbulToday()} value={advanceForm.date} onChange={(e) => setAdvanceForm({ ...advanceForm, date: e.target.value })} /></label>
+                      <label className="field"><span>Dekont / açıklama</span><input maxLength={100} value={advanceForm.reference} onChange={(e) => setAdvanceForm({ ...advanceForm, reference: e.target.value })} /></label>
+                    </div>
+                    {advanceForm.amount > 0 && customer && (() => {
+                      // Gelen ödeme önce carinin mevcut borcunu kapatır; kalan net alacak avans olur.
+                      const debt = Math.max(0, customer.balance);
+                      const newAdvance = Math.max(0, advanceForm.amount - customer.balance);
+                      const applied = exchangeRate > 0 ? Math.min(Math.max(0, total - down), newAdvance / exchangeRate) : 0;
+                      return <small className="muted-note">{debt > 0.009 ? `Önce mevcut borç ${money(Math.min(debt, advanceForm.amount))} kapanır. ` : ""}Kullanılabilir avans {money(newAdvance)} olur{total > 0 ? ` · bu siparişe ${money(applied, currency)} uygulanır · avans hesabında ${money(Math.max(0, newAdvance - applied * exchangeRate))} kalır` : ""}.</small>;
+                    })()}
+                    <div className="head-actions"><button type="button" className="mini-btn" disabled={advanceBusy} onClick={() => setAdvanceFormOpen(false)}>Vazgeç</button><button type="button" className="primary-btn" disabled={advanceBusy || advanceForm.amount <= 0 || !advanceForm.date} onClick={saveAdvanceReceipt}>{advanceBusy ? "Kaydediliyor…" : "Avansı kaydet ve siparişe uygula"}</button></div>
+                  </div>
+                ))}
               </section>
               <label className="field order-note"><span>Sipariş notu</span><textarea maxLength={500} value={note} onChange={e=>setNote(e.target.value)}/></label>
               {fullyFromAdvance?<div className="advance-covered"><CheckCircle2/><div><b>Siparişin tamamı avanstan karşılanıyor</b><p>Yeni tahsilat, taksit veya çek planı oluşturulmayacak.</p></div></div>:<>
@@ -1775,7 +1872,7 @@ function NewSale({spare=false}:{spare?:boolean}) {
               <div className="choice-grid">
                 {[
                   ["CASH", advanceAmount>0?"Kalan tutar peşin":"Tamamı peşin"],
-                  ["TERM", `${customer?.paymentTermDays || 30} gün vadeli`],
+                  ["TERM", "Evraksız (açık hesap) vadeli"],
                   ["CHECK", "Yeni çek / senet"],
                   ["MIXED", "Peşinat + evrak"],
                   ["CREDIT_CARD", "Kredi kartı"],
@@ -1786,35 +1883,53 @@ function NewSale({spare=false}:{spare?:boolean}) {
                       name="payment"
                       value={v}
                       checked={payment === v}
-                      onChange={() => {setPayment(v);if(v!=="MIXED")setDown(0);}}
+                      onChange={() => {setPayment(v);if(!["MIXED","TERM"].includes(v))setDown(0);if(v==="TERM"){const days=customer?.paymentTermDays||30;setPlanFirstDays(days);setTermInstallmentCount(1);setPaymentSchedule([{dueDate:addDaysTo(orderDate,days),amount:Math.max(0,Number((total-advanceAmount-down).toFixed(2)))}]);}}}
                     />
                     <span>{l}</span>
                     <CheckCircle2 />
                   </label>
                 ))}
               </div>
-              {payment === "TERM" && total-down-advanceAmount>0.01 && (
-                <>
-                  <div className="instrument-plan">
-                    <label className="field">
-                      <span>Taksit adedi</span>
-                      <input
-                        type="number"
-                        min="1"
-                        max="24"
-                        value={termInstallmentCount}
-                        onChange={(e) => { const count=Number(e.target.value); setTermInstallmentCount(count); rebuildSchedule(count); }}
-                      />
-                    </label>
-                    <button type="button" className="mini-btn" onClick={() => rebuildSchedule(termInstallmentCount)}>Tutarları eşit dağıt</button>
+              {payment === "TERM" && (
+                <div className="term-panel">
+                  <div className="term-intro">
+                    <b>Evraksız (açık hesap) satış</b>
+                    <p>Çek veya senet alınmaz. Tutar onayda cariye borç yazılır, vadesinde havale/EFT ile tahsil edilir; ödeme gelene kadar <b>Evraksız alacaklar</b> raporunda izlenir.</p>
                   </div>
-                  <EditablePaymentPlan
-                    rows={paymentSchedule}
-                    setRows={setPaymentSchedule}
-                    total={Math.max(0,total - down - advanceAmount)}
-                    currency={currency}
-                  />
-                </>
+                  <div className="term-down">
+                    <label className="field"><span>Peşinat (varsa)</span><MoneyInput currency={currency} value={down} invalid={down + advanceAmount > total} placeholder="Peşinat yok" onChange={changeDown} /></label>
+                    <div className="chip-filters">
+                      <button type="button" className={down === 0 ? "active" : ""} onClick={() => changeDown(0)}>Peşinatsız</button>
+                      {[10, 20, 30, 50].map((rate) => { const value = Number((Math.max(0, total - advanceAmount) * rate / 100).toFixed(2)); return <button type="button" key={rate} disabled={!total} className={down > 0 && Math.abs(down - value) < 0.01 ? "active" : ""} onClick={() => changeDown(value)}>%{rate}</button>; })}
+                    </div>
+                    <small className="muted-note">Peşinat sipariş onaylandığında tahsil edilmiş sayılır ve cariden düşülür; vadeye yalnızca kalan tutar bölünür.</small>
+                    {down + advanceAmount > total && <div className="error-box inline-warning">Peşinat ve avans toplamı sipariş tutarını aşamaz.</div>}
+                  </div>
+                  {total - down - advanceAmount > 0.01 && (
+                    <>
+                      <DuePlanner orderDate={orderDate} count={termInstallmentCount} countLabel="Taksit adedi" firstDays={planFirstDays} interval={planInterval} defaultDays={customer?.paymentTermDays || 30}
+                        onChange={(count, firstDays, interval) => { setTermInstallmentCount(count); setPlanFirstDays(firstDays); setPlanInterval(interval); buildPlan(count, firstDays, interval); }} />
+                      <EditablePaymentPlan rows={effectiveSchedule} setRows={setPaymentSchedule} total={Math.max(0, total - down - advanceAmount)} currency={currency} />
+                    </>
+                  )}
+                  {customer && total > 0 && (() => {
+                    // Carinin evraksız borcu bu siparişle ne olur (TL); risk limiti tanımlıysa karşılaştırılır.
+                    const current = Math.max(0, customer.balance);
+                    const added = Math.max(0, total - down - advanceAmount) * exchangeRate;
+                    const after = Math.max(0, customer.balance + (total - advanceAmount) * exchangeRate - down * exchangeRate);
+                    const over = customer.riskLimit > 0 && after > customer.riskLimit;
+                    return (
+                      <div className={`term-risk ${over ? "over" : ""}`}>
+                        <div><small>Carinin şu anki durumu</small><b>{customer.balance > 0.009 ? `Borç ${money(current)}` : customer.balance < -0.009 ? `Avans ${money(-customer.balance)}` : "Bakiye yok"}</b></div>
+                        <div><small>Bu siparişle eklenecek</small><b>+ {money(added)}</b></div>
+                        <div><small>Onaydan sonra evraksız borç</small><b>{money(after)}</b></div>
+                        <div><small>Risk limiti</small><b>{customer.riskLimit > 0 ? money(customer.riskLimit) : "Tanımsız"}</b></div>
+                        {customer.balance < -0.009 && advanceAmount === 0 && <p className="muted-note">Carinin avansı onayda bu borçtan otomatik düşer. Vade planının da azalmasını istiyorsanız yukarıdaki <b>Avans hesabından düş</b> alanını kullanın.</p>}
+                        {over && <p className="danger-text">Onaydan sonra borç risk limitini {money(after - customer.riskLimit)} aşacak. Peşinat alın, çek/senet isteyin ya da onaylayan yöneticiye not düşün.</p>}
+                      </div>
+                    );
+                  })()}
+                </div>
               )}
               {payment === "CREDIT_CARD" && (
                 <div className="instrument-plan card-plan">
@@ -1834,7 +1949,7 @@ function NewSale({spare=false}:{spare?:boolean}) {
                     currency={currency}
                     value={down}
                     invalid={down > total}
-                    onChange={setDown}
+                    onChange={changeDown}
                   />
                 </label>{down>total&&<div className="error-box inline-warning">Peşinat genel toplamdan büyük olamaz. En fazla {money(total,currency)} girebilirsiniz.</div>}</>
               )}
@@ -1850,22 +1965,15 @@ function NewSale({spare=false}:{spare?:boolean}) {
                       <option value="PROMISSORY_NOTE">Senet</option>
                     </select>
                   </label>
-                  <label className="field">
-                    <span>Kaç adet?</span>
-                    <input
-                      type="number"
-                      min="1"
-                      max="24"
-                      value={instrumentCount}
-                      onChange={(e) => { const count=Number(e.target.value); setInstrumentCount(count); rebuildSchedule(count); }}
-                      />
-                  </label>
-                  <button type="button" className="mini-btn" onClick={() => rebuildSchedule(instrumentCount)}>Tutarları eşit dağıt</button>
                 </div>
-              )}{" "}
+              )}
+              {["CHECK", "MIXED"].includes(payment) && total-down-advanceAmount>0.01 && (
+                <DuePlanner orderDate={orderDate} count={instrumentCount} countLabel={instrumentType === "CHECK" ? "Kaç adet çek?" : "Kaç adet senet?"} firstDays={planFirstDays} interval={planInterval} defaultDays={customer?.paymentTermDays || 30}
+                  onChange={(count, firstDays, interval) => { setInstrumentCount(count); setPlanFirstDays(firstDays); setPlanInterval(interval); buildPlan(count, firstDays, interval); }} />
+              )}
               {["CHECK", "MIXED"].includes(payment) && total-down-advanceAmount>0.01 && (
                 <EditablePaymentPlan
-                  rows={paymentSchedule}
+                  rows={effectiveSchedule}
                   setRows={setPaymentSchedule}
                   total={Math.max(0,total - down - advanceAmount)}
                   currency={currency}
@@ -1920,6 +2028,40 @@ function NewSale({spare=false}:{spare?:boolean}) {
         </aside>
       </div>
     </form>
+  );
+}
+
+/** Vade süresi seçimi: ilk vade (gün), adet ve vadeler arası süre. Değişince plan yeniden kurulur. */
+function DuePlanner({ orderDate, count, countLabel, firstDays, interval, defaultDays, onChange }: {
+  orderDate: string; count: number; countLabel: string; firstDays: number; interval: number; defaultDays: number;
+  onChange: (count: number, firstDays: number, interval: number) => void;
+}) {
+  const options = Array.from(new Set([defaultDays, 30, 45, 60, 90, 120, 180])).sort((a, b) => a - b);
+  const lastDue = addDaysTo(orderDate, firstDays + interval * (Math.max(1, count) - 1));
+  const averageDays = Math.round(firstDays + (interval * (Math.max(1, count) - 1)) / 2);
+  const fmt = (iso: string) => iso.split("-").reverse().join(".");
+  return (
+    <div className="due-planner">
+      <div className="due-planner-row">
+        <span className="due-planner-label">İlk vade</span>
+        <div className="chip-filters">
+          {options.map((days) => <button type="button" key={days} className={firstDays === days ? "active" : ""} onClick={() => onChange(count, days, interval)}>{days} gün{days === defaultDays ? " · cari" : ""}</button>)}
+        </div>
+        <label className="due-days"><input type="number" min={0} max={720} value={firstDays} onChange={(e) => onChange(count, Math.max(0, Math.min(720, Number(e.target.value) || 0)), interval)} aria-label="İlk vade gün sayısı" /> gün sonra · <b>{fmt(addDaysTo(orderDate, firstDays))}</b></label>
+      </div>
+      <div className="due-planner-row">
+        <label className="field"><span>{countLabel}</span><input type="number" min={1} max={24} value={count} onChange={(e) => onChange(Math.max(1, Math.min(24, Number(e.target.value) || 1)), firstDays, interval)} /></label>
+        {count > 1 && (
+          <label className="field"><span>Vadeler arası</span>
+            <select value={interval} onChange={(e) => onChange(count, firstDays, Number(e.target.value))}>
+              {[15, 30, 45, 60, 90].map((d) => <option key={d} value={d}>{d} gün</option>)}
+            </select>
+          </label>
+        )}
+        <button type="button" className="mini-btn" onClick={() => onChange(count, firstDays, interval)}>Planı yeniden kur</button>
+        <p className="due-planner-summary">{count > 1 ? `${count} vade · son vade ${fmt(lastDue)} · ortalama vade ${averageDays} gün` : `Tek vade · ${fmt(lastDue)}`}</p>
+      </div>
+    </div>
   );
 }
 
@@ -2151,6 +2293,8 @@ function Receipts({ user, advanceOnly=false }: { user: User; advanceOnly?:boolea
       status: string;
     }[];
     schedules:{id:number;saleId:number;saleNumber:string;sequenceNo:number;paymentType:string;dueDate:string;amount:number;paidAmount:number;remainingAmount:number;currency:string;exchangeRate:number;status:string;instrumentId?:number;instrumentNumber?:string;instrumentStatus?:string;issuer?:string;serialNumber?:string;bankName?:string}[];
+    advanceReceipts?: AdvanceReceipt[];
+    opening?: OpeningBalance;
   };
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [customerId, setCustomerId] = useState(()=>Number(searchParams.get("customerId"))||0);
@@ -2266,17 +2410,7 @@ function Receipts({ user, advanceOnly=false }: { user: User; advanceOnly?:boolea
       <section className="panel ledger-selector">
         <label className="field">
           <span>Müşteri</span>
-          <select
-            value={customerId}
-            onChange={(e) => {setLedger(null);setCustomerId(Number(e.target.value));setScheduleId(0);setReceiptAmount("");setReceiptMode(advanceOnly?"GENERAL":"SCHEDULE");}}
-          >
-            <option value="">Müşteri seçin…</option>
-            {customers.map((c) => (
-              <option value={c.id} key={c.id}>
-                {c.code} · {c.name}
-              </option>
-            ))}
-          </select>
+          <CustomerPicker customers={customers} value={customerId} onChange={(id) => {setLedger(null);setCustomerId(id);setScheduleId(0);setReceiptAmount("");setReceiptMode(advanceOnly?"GENERAL":"SCHEDULE");}} />
         </label>
         {ledger && (
           <>
@@ -2293,6 +2427,7 @@ function Receipts({ user, advanceOnly=false }: { user: User; advanceOnly?:boolea
       {!advanceOnly&&ledger&&<section className="due-picker panel"><div className="due-picker-head"><div><span className="eyebrow">AÇIK VADELER</span><h2>Hangi ödemeyi tahsil ediyorsunuz?</h2><p>Normal taksit, çek ve senetlerin tamamı burada görünür. Vadesi gelmemiş evrak da erken tahsil edilebilir.</p></div><button className={receiptMode==="GENERAL"?"mini-btn active":"mini-btn"} onClick={()=>{setReceiptMode("GENERAL");setScheduleId(0);setReceiptAmount("")}}>Vadeden bağımsız ödeme</button></div><div className="due-options">{ledger.schedules.map(x=>{const overdue=x.dueDate<new Date().toISOString().slice(0,10);const instrument=["CHECK","PROMISSORY_NOTE"].includes(x.paymentType);return <button key={x.id} className={`${scheduleId===x.id&&receiptMode!=="GENERAL"?"selected":""} ${overdue?"overdue":""}`} onClick={()=>chooseSchedule(x.id)}><span><b>{x.saleNumber} · {paymentTypeLabel(x.paymentType)}</b><small>{overdue?"Vadesi geçti":x.dueDate>new Date().toISOString().slice(0,10)&&instrument?"Erken tahsil edilebilir":"Vade"} · {dateOnly(x.dueDate)}</small>{instrument&&<small>{x.instrumentNumber||"Evrak hazırlanıyor"}</small>}</span><strong>{money(x.remainingAmount,x.currency)}<small>{x.paidAmount>0?`${money(x.paidAmount,x.currency)} ödendi`:instrument?"Evrak tutarı":"Kalan taksit"}</small></strong></button>})}{!ledger.schedules.length&&<EmptyInline text="Bu müşterinin açık taksit, çek veya senedi bulunmuyor. Serbest tahsilat kullanabilirsiniz."/>}</div></section>}
       {advanceOnly&&ledger&&<section className="panel advance-panel"><div className="advance-balance"><span>Kullanılabilir avans</span><strong>{money(Math.max(0,-ledger.customer.balance))}</strong><small>Mevcut borçlardan sonra kalan net cari alacak</small></div><div className="head-actions">{user.permissions?.includes("SALES")&&<><NavLink className="primary-btn" to={`/satislar/yeni?customerId=${customerId}`}>Makine siparişinde kullan</NavLink><NavLink className="mini-btn" to={`/yedek-parcalar/yeni?customerId=${customerId}`}>Parça siparişinde kullan</NavLink></>}<NavLink className="mini-btn" to={`/musteriler/${customerId}`}>Cari detayına dön</NavLink></div>{!["ADMIN","ACCOUNTING"].includes(user.role)&&<p>Avans girişi için muhasebe veya yönetici yetkisi gerekir. Bu ekranda bakiye ve hareketleri inceleyebilirsiniz.</p>}</section>}
       {advanceOnly&&ledger&&<CheckAdvanceHistory key={customerId} customerId={customerId} refresh={advanceRefresh}/>}
+      {advanceOnly&&ledger&&<AdvanceCorrections key={`corr-${customerId}`} customerId={customerId} receipts={ledger.advanceReceipts||[]} opening={ledger.opening||null} canEdit={["ADMIN","ACCOUNTING"].includes(user.role)} onSaved={(text)=>{setMessage(text);load();}}/>}
       {ledger && (
         <div className={`detail-grid ledger-layout ${advanceOnly&&receiptMethod==="CHECK"?"check-advance-layout":""}`}>
           <section className="panel">
@@ -2910,18 +3045,21 @@ function Instruments({ user }: { user: User }) {
   );
   const [discounts, setDiscounts] = useState<Record<number, Discount>>({});
   const [endorsements,setEndorsements]=useState<Record<number,Endorsement>>({});
-  // Evrak bulma: arama, süzgeçler, sıralama ve görünüm (liste/kart).
-  const [query, setQuery] = useState("");
+  // Evrak bulma: arama, süzgeçler, sıralama ve görünüm (liste/siparişe göre/kart).
+  // Sipariş detayından gelindiğinde (?siparis=SAT-...) o siparişin evrakları aranır.
+  const [instrumentParams] = useSearchParams();
+  const [query, setQuery] = useState(() => instrumentParams.get("ara") || instrumentParams.get("siparis") || "");
+  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
   const [customerFilter, setCustomerFilter] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
   const [dueFrom, setDueFrom] = useState("");
   const [dueTo, setDueTo] = useState("");
   const [sort, setSort] = useState("DUE_ASC");
-  const [view, setView] = useState<"list" | "cards">(() => {
-    try { return localStorage.getItem("celmak.instrumentView") === "cards" ? "cards" : "list"; } catch { return "list"; }
+  const [view, setView] = useState<"list" | "orders" | "cards">(() => {
+    try { const saved = localStorage.getItem("celmak.instrumentView"); return saved === "cards" || saved === "orders" ? saved : "list"; } catch { return "list"; }
   });
   const [focusId, setFocusId] = useState<number | null>(null);
-  const changeView = (next: "list" | "cards") => {
+  const changeView = (next: "list" | "orders" | "cards") => {
     setView(next);
     setFocusId(null);
     try { localStorage.setItem("celmak.instrumentView", next); } catch { /* tarayıcı depolaması kapalı olabilir */ }
@@ -3079,6 +3217,44 @@ function Instruments({ user }: { user: User }) {
   const customerNames = Array.from(new Set(items.map((x) => x.customerName))).sort((a, b) => a.localeCompare(b, "tr"));
   const clearFinder = () => { setQuery(""); setCustomerFilter(""); setTypeFilter(""); setDueFrom(""); setDueTo(""); };
   const openFocused = (id: number) => { setFocusId(id); setOpenId(id); window.scrollTo({ top: 0, behavior: "smooth" }); };
+  const instrumentRow = (x: Instrument) => {
+    const incompleteRow = !x.issuer || !x.serialNumber || (x.instrumentType === "CHECK" && !x.bankName);
+    return (
+      <tr key={x.id} className={x.daysToDue < 0 && !closedInstrument(x) ? "overdue-row" : ""} onClick={() => openFocused(x.id)}>
+        <td><b>{dateOnly(x.dueDate)}</b><small className={x.daysToDue < 0 && !closedInstrument(x) ? "danger-text" : ""}>{closedInstrument(x) ? "Kapandı" : x.daysToDue < 0 ? `${Math.abs(x.daysToDue)} gün gecikti` : x.daysToDue === 0 ? "Bugün" : `${x.daysToDue} gün kaldı`}</small></td>
+        <td><b>{x.customerName}</b><small>{x.saleNumber ? <button type="button" className="link-btn" title="Bu siparişin bütün evraklarını göster" onClick={(e) => { e.stopPropagation(); setQuery(x.saleNumber); setFocusId(null); }}>{x.saleNumber}</button> : "Bağlantı çeki"}</small></td>
+        <td><b>{x.instrumentType === "CHECK" ? "Çek" : "Senet"}</b><small>{x.number}</small></td>
+        <td>{incompleteRow ? <span className="import-chip warn">Bilgi eksik</span> : <><b>{x.serialNumber}</b><small>{[x.bankName, x.issuer].filter(Boolean).join(" · ")}</small></>}</td>
+        <td className="num"><b>{money(x.amount, x.currency)}</b>{x.currency !== "TRY" && <small>{money(x.tryAmount)}</small>}</td>
+        <td><Status value={x.discountCompany ? "DISCOUNTED" : x.status} /></td>
+        <td><button type="button" className="mini-btn" onClick={(e) => { e.stopPropagation(); openFocused(x.id); }}>Aç</button></td>
+      </tr>
+    );
+  };
+  // Siparişe göre görünüm: aynı siparişin evrakları tek başlık altında; başlıklar en yakın açık vadeye göre sıralanır.
+  const instrumentGroups = Array.from(
+    shown.reduce((map, x) => {
+      const key = x.saleNumber || `bag-${x.customerName}`;
+      map.set(key, [...(map.get(key) || []), x]);
+      return map;
+    }, new Map<string, Instrument[]>()),
+  ).map(([key, groupItems]) => {
+    const openItems = groupItems.filter((x) => !closedInstrument(x));
+    const dues = (openItems.length ? openItems : groupItems).map((x) => x.dueDate).sort();
+    return {
+      key,
+      saleNumber: groupItems[0].saleNumber,
+      saleId: groupItems[0].saleId,
+      customerName: groupItems[0].customerName,
+      items: groupItems,
+      total: groupItems.reduce((t, x) => t + x.tryAmount, 0),
+      overdue: openItems.filter((x) => x.daysToDue < 0).length,
+      notReceived: groupItems.filter((x) => x.status === "PLANNED").length,
+      closed: groupItems.length - openItems.length,
+      nextDue: openItems.length ? dues[0] : dues[dues.length - 1],
+      allClosed: !openItems.length,
+    };
+  }).sort((a, b) => Number(a.allClosed) - Number(b.allClosed) || a.nextDue.localeCompare(b.nextDue));
   if (!allowed)
     return (
       <Empty
@@ -3118,6 +3294,7 @@ function Instruments({ user }: { user: User }) {
         </select>
         <div className="view-toggle" role="group" aria-label="Görünüm">
           <button type="button" className={view === "list" ? "active" : ""} onClick={() => changeView("list")}>Liste</button>
+          <button type="button" className={view === "orders" ? "active" : ""} onClick={() => changeView("orders")}>Siparişe göre</button>
           <button type="button" className={view === "cards" ? "active" : ""} onClick={() => changeView("cards")}>Kart</button>
         </div>
         <div className="finder-summary">
@@ -3196,26 +3373,45 @@ function Instruments({ user }: { user: User }) {
           </button>
         ))}
       </div>
-      {view === "list" && !focusId ? (
+      {view === "orders" && !focusId ? (
+        <section className="panel instrument-groups">
+          {instrumentGroups.map((g) => {
+            const expanded = openGroups[g.key] ?? (instrumentGroups.length === 1 || words.length > 0);
+            return (
+              <div className={`instrument-group ${expanded ? "open" : ""}`} key={g.key}>
+                <button type="button" className="instrument-group-head" aria-expanded={expanded} onClick={() => setOpenGroups((cur) => ({ ...cur, [g.key]: !expanded }))}>
+                  <ChevronRight className="group-chevron" />
+                  <span className="group-title"><b>{g.saleNumber || "Bağlantı / avans çekleri"}</b><small>{g.customerName}</small></span>
+                  <span className="group-meta">
+                    <em>{g.items.length} evrak</em>
+                    {g.overdue > 0 && <em className="danger">{g.overdue} vadesi geçti</em>}
+                    {g.notReceived > 0 && <em className="warn">{g.notReceived} teslim alınmadı</em>}
+                    {g.closed === g.items.length && <em className="done">Tamamlandı</em>}
+                  </span>
+                  <span className="group-due"><small>{g.closed === g.items.length ? "Son vade" : "En yakın vade"}</small><b>{dateOnly(g.nextDue)}</b></span>
+                  <strong>{money(g.total)}</strong>
+                </button>
+                {expanded && (
+                  <div className="table-wrap">
+                    <table className="instrument-table">
+                      <thead><tr><th>Vade</th><th>Cari</th><th>Evrak</th><th>Seri no · banka</th><th className="num">Tutar</th><th>Durum</th><th /></tr></thead>
+                      <tbody>{g.items.map(instrumentRow)}</tbody>
+                    </table>
+                    {g.saleId && <div className="group-foot"><NavLink className="text-btn" to={`/satislar/${g.saleId}`}>Sipariş detayını aç <ChevronRight /></NavLink></div>}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          {!shown.length && <EmptyInline text={searching ? "Aramanıza uygun evrak bulunamadı. Yazımı kontrol edin veya süzgeçleri temizleyin." : "Bu sekmede kıymetli evrak bulunmuyor."} />}
+        </section>
+      ) : view === "list" && !focusId ? (
         <section className="panel">
           <div className="table-wrap">
             <table className="instrument-table">
               <thead><tr><th>Vade</th><th>Cari</th><th>Evrak</th><th>Seri no · banka</th><th className="num">Tutar</th><th>Durum</th><th /></tr></thead>
               <tbody>
-                {shown.map((x) => {
-                  const incompleteRow = !x.issuer || !x.serialNumber || (x.instrumentType === "CHECK" && !x.bankName);
-                  return (
-                    <tr key={x.id} className={x.daysToDue < 0 && !closedInstrument(x) ? "overdue-row" : ""} onClick={() => openFocused(x.id)}>
-                      <td><b>{dateOnly(x.dueDate)}</b><small className={x.daysToDue < 0 && !closedInstrument(x) ? "danger-text" : ""}>{closedInstrument(x) ? "Kapandı" : x.daysToDue < 0 ? `${Math.abs(x.daysToDue)} gün gecikti` : x.daysToDue === 0 ? "Bugün" : `${x.daysToDue} gün kaldı`}</small></td>
-                      <td><b>{x.customerName}</b><small>{x.saleNumber || "Bağlantı çeki"}</small></td>
-                      <td><b>{x.instrumentType === "CHECK" ? "Çek" : "Senet"}</b><small>{x.number}</small></td>
-                      <td>{incompleteRow ? <span className="import-chip warn">Bilgi eksik</span> : <><b>{x.serialNumber}</b><small>{[x.bankName, x.issuer].filter(Boolean).join(" · ")}</small></>}</td>
-                      <td className="num"><b>{money(x.amount, x.currency)}</b>{x.currency !== "TRY" && <small>{money(x.tryAmount)}</small>}</td>
-                      <td><Status value={x.discountCompany ? "DISCOUNTED" : x.status} /></td>
-                      <td><button type="button" className="mini-btn" onClick={(e) => { e.stopPropagation(); openFocused(x.id); }}>Aç</button></td>
-                    </tr>
-                  );
-                })}
+                {shown.map(instrumentRow)}
               </tbody>
             </table>
           </div>

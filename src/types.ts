@@ -17,6 +17,8 @@ export type Customer = {
   note?: string | null;
   district?: string | null;
   address?: string | null;
+  taxNumber?: string | null;
+  taxOffice?: string | null;
   /** Bu cariye açılış bakiyesi (devir) girilmiş mi (1/0). */
   hasOpeningBalance?: number;
 };
@@ -46,6 +48,8 @@ export type Product = {
   manufacturerModel?: string;
   manualPrice?: number;
   stockTracking?: number;
+  /** Siparişte yazılan, katalogda görünmeyen ürün (1). */
+  isCustom?: number;
 };
 export type Sale = {
   orderKind: string;
@@ -98,6 +102,7 @@ export type Instrument = {
   status: string;
   currentHolder?: string;
   customerName: string;
+  saleId?: number | null;
   saleNumber: string;
   collectionDate?: string;
   collectionRate?: number;
@@ -175,7 +180,7 @@ export const statusLabels: Record<string, string> = {
 };
 export const paymentMethodLabels: Record<string, string> = {
   CASH: "Peşin",
-  TERM: "Vadeli (havale / EFT)",
+  TERM: "Açık hesap vadeli (havale / EFT)",
   CHECK: "Çek / senet",
   MIXED: "Peşinat + evrak",
   CREDIT_CARD: "Kredi kartı",

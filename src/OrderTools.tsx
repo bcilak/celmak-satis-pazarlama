@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState, type ChangeEvent, type FormEvent, type Re
 import { useNavigate, useParams } from "react-router-dom";
 import { ArrowLeft, ChartColumn, PencilLine, Pencil, Plus, Printer, StickyNote, TriangleAlert, Undo2, X } from "lucide-react";
 import { api } from "./api";
+import celmakLogo from "./assets/celmak-logo.jpg";
+import { ReportTabs } from "./UnbackedReport";
 import { VAT_RATES, currencySymbol, money, paymentMethodLabels, statusLabels, type Product } from "./types";
 
 /* ------------------------------------------------------------------ */
@@ -13,7 +15,13 @@ const longDate = (value?: string | null) => {
   const date = value.length > 10 ? new Date(value.replace(" ", "T") + "Z") : new Date(`${value}T12:00:00`);
   return new Intl.DateTimeFormat("tr-TR", { dateStyle: "long" }).format(date);
 };
-const todayIso = () => new Date().toISOString().slice(0, 10);
+const shortDate = (value?: string | null) => {
+  if (!value) return "";
+  const date = value.length > 10 ? new Date(value.replace(" ", "T") + "Z") : new Date(`${value}T12:00:00`);
+  return new Intl.DateTimeFormat("tr-TR", { day: "2-digit", month: "2-digit", year: "numeric" }).format(date);
+};
+// Bugün Türkiye saatine göre (UTC gece yarısından önce bir gün geride kalmasın).
+const todayIso = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Istanbul" }).format(new Date());
 const qty = (value: number) => new Intl.NumberFormat("tr-TR", { maximumFractionDigits: 2 }).format(value);
 
 /* ------------------------------------------------------------------ */
@@ -227,16 +235,19 @@ type SaleDoc = {
     id: number; number: string; status: string; note?: string; paymentMethod: string; cardInstallments?: number | null; orderKind?: "MACHINE" | "SPARE_PART";
     subtotal: number; vatTotal: number; grandTotal: number; downPayment: number; advanceAmount: number;
     currency: string; exchangeRate: number; createdAt: string; orderDate?: string; approvedAt?: string | null;
-    customerId: number; customerCode: string; customerName: string; customerTaxNumber?: string; customerPhone?: string; customerEmail?: string; customerCity?: string;
+    customerId: number; customerCode: string; customerName: string; customerTaxNumber?: string; customerTaxOffice?: string; customerPhone?: string; customerEmail?: string; customerCity?: string; customerDistrict?: string; customerAddress?: string;
     createdBy: string; approvalAssignee?: string;
   };
   items: { id: number; productId: number; code: string; name: string; unit: string; model?: string; productGroup?: string; quantity: number; unitPrice: number; vatRate: number; lineTotal: number; shippedQuantity: number; returnedQuantity: number }[];
-  schedule: { sequenceNo: number; paymentType: string; dueDate: string; amount: number; paidAmount: number; currency: string; status: string }[];
-  shipments: { id: number; number: string; status: string; plannedDate: string; actualDate?: string; dispatchNumber?: string }[];
+  schedule: { id: number; sequenceNo: number; paymentType: string; dueDate: string; amount: number; paidAmount: number; currency: string; status: string; instrumentId?: number | null; instrumentNumber?: string | null; instrumentStatus?: string | null }[];
+  shipments: { id: number; number: string; status: string; plannedDate: string; actualDate?: string; dispatchNumber?: string; deliveryAddress?: string }[];
   returns: { id: number; number: string; returnDate: string; reason: string; subtotal: number; vatTotal: number; grandTotal: number; currency: string; createdBy: string; items: { quantity: number; lineTotal: number; name: string; code: string; unit: string }[] }[];
-  amendments?: { id: number; number: string; amendmentDate: string; reason: string; previousTotal: number; newTotal: number; difference: number; currency: string; settlement: string; settlementDueDate?: string | null; createdBy: string; changes: { product: string; oldQuantity: number; newQuantity: number; oldTotal: number; newTotal: number }[] }[];
+  amendments?: { id: number; number: string; amendmentDate: string; reason: string; previousTotal: number; newTotal: number; difference: number; currency: string; settlement: string; settlementDueDate?: string | null; createdBy: string; changes: { product: string; oldQuantity: number; newQuantity: number; oldTotal: number; newTotal: number }[]; paymentPlan?: { replaced: { paymentType: string; dueDate: string; amount: number; instrumentNumber?: string | null }[]; plan: PlanRow[] } | null }[];
 };
 export type { SaleDoc };
+
+// Çelmak'ın matbu sipariş formu (Doküman No SP.FR.02) düzeninde basılır.
+const ORDER_FORM_ROWS = 14;
 
 export function SalePrint() {
   const { id } = useParams();
@@ -248,77 +259,100 @@ export function SalePrint() {
   if (error) return <div className="error-box">{error}</div>;
   if (!data) return <div className="loading">Sipariş formu hazırlanıyor…</div>;
   const s = data.sale;
+  const cur = s.currency;
   const remaining = Math.max(0, s.grandTotal - s.downPayment - s.advanceAmount);
+  // Sıra No: SAT-2026-000123 → 2026/000123
+  const serial = s.number.replace(/^[A-Z]+-(\d{4})-(\d+)$/, "$1/$2");
+  const address = [s.customerAddress, [s.customerDistrict, s.customerCity].filter(Boolean).join(" / ")].filter(Boolean).join(" ");
+  const activeShipments = data.shipments.filter((x) => x.status !== "CANCELLED").sort((a, b) => a.plannedDate.localeCompare(b.plannedDate));
+  const firstShipment = activeShipments[0];
+  const shipmentAddress = firstShipment?.deliveryAddress || address;
+  const vatRates = Array.from(new Set(data.items.map((x) => x.vatRate))).sort((a, b) => a - b);
+  const vatLabel = vatRates.length === 1 ? `% ${vatRates[0]} KDV` : `KDV (${vatRates.map((r) => `%${r}`).join(", ")})`;
+  const approved = s.status === "APPROVED" || s.status === "COMPLETED";
+  const installments = data.schedule.filter((x) => x.sequenceNo > 0);
   const method = paymentMethodLabels[s.paymentMethod] || s.paymentMethod;
+  const blankRows = Math.max(0, ORDER_FORM_ROWS - data.items.length);
   return (
     <PrintFrame title={`${s.number} sipariş formu`} fileName={`${s.number} Siparis Formu`}>
-      <DocHeader title="SİPARİŞ FORMU" number={s.number} date={longDate(s.orderDate || s.createdAt)} extra={<p><span>Durum</span><b>{statusLabels[s.status] || s.status}</b></p>} />
-      <section className="doc-parties">
-        <div>
-          <small>ALICI</small>
-          <b>{s.customerName}</b>
-          <span>Cari kodu: {s.customerCode}</span>
-          {s.customerTaxNumber && <span>Vergi no: {s.customerTaxNumber}</span>}
-          {s.customerCity && <span>{s.customerCity}</span>}
-          {s.customerPhone && <span>Tel: {s.customerPhone}</span>}
-        </div>
-        <div>
-          <small>SİPARİŞ BİLGİSİ</small>
-          <span>Hazırlayan: {s.createdBy}</span>
-          <span>Onay: {s.approvalAssignee || "—"}{s.approvedAt ? ` · ${longDate(s.approvedAt)}` : ""}</span>
-          <span>Para birimi: {s.currency}{s.currency !== "TRY" ? ` · Kur ${s.exchangeRate}` : ""}</span>
-          <span>Ödeme: {method}{s.paymentMethod === "CREDIT_CARD" && s.cardInstallments && s.cardInstallments > 1 ? ` · ${s.cardInstallments} taksit` : ""}</span>
-        </div>
-      </section>
-      <table className="doc-table">
-        <thead>
-          <tr><th>#</th><th>Ürün / model</th><th className="num">Miktar</th><th className="num">Birim fiyat (KDV dahil)</th><th className="num">KDV</th><th className="num">Tutar (KDV dahil)</th></tr>
-        </thead>
-        <tbody>
-          {data.items.map((item, index) => (
-            <tr key={item.id}>
-              <td>{index + 1}</td>
-              <td><b>{item.name}</b><small>{[item.model, item.productGroup, item.code].filter(Boolean).join(" · ")}</small></td>
-              <td className="num">{qty(item.quantity)} {item.unit}</td>
-              <td className="num">{money(item.lineTotal / item.quantity, s.currency)}</td>
-              <td className="num">%{item.vatRate}</td>
-              <td className="num">{money(item.lineTotal, s.currency)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <section className="doc-bottom">
-        <div className="doc-payment">
-          <h2>Ödeme planı</h2>
-          {data.schedule.length ? (
-            <table className="doc-table compact">
-              <thead><tr><th>#</th><th>Tür</th><th>Vade</th><th className="num">Tutar</th></tr></thead>
-              <tbody>
-                {data.schedule.map((row) => (
-                  <tr key={row.sequenceNo}><td>{row.sequenceNo === 0 ? "Peşinat" : row.sequenceNo}</td><td>{paymentMethodLabels[row.paymentType] || row.paymentType}</td><td>{longDate(row.dueDate)}</td><td className="num">{money(row.amount, row.currency)}</td></tr>
+      <div className="order-form">
+        <header className="of-head">
+          <img src={celmakLogo} alt="Çelmak Tarım Makinaları" />
+          <div className="of-company">
+            <span>ÇELMAK TARIM MAKİNALARI TİC. SAN. LTD. ŞTİ.</span>
+            <span>Yeni Sanayi Sitesi 48. Sokak No:8 Balıkesir / TÜRKİYE</span>
+            <span>T. 0 266 246 28 00-01 F. 0 266 246 28 02</span>
+            <span className="of-web">
+              <span>www.celmak.com&nbsp;&nbsp;info@celmak.com</span>
+              <span>Sıra No : {serial}</span>
+            </span>
+          </div>
+          {!approved && <div className="of-stamp">{statusLabels[s.status] || s.status}</div>}
+        </header>
+        <h1 className="of-title">SİPARİŞ FORMU</h1>
+        <table className="of-info">
+          <colgroup><col style={{ width: "27%" }} /><col style={{ width: "40%" }} /><col style={{ width: "15%" }} /><col style={{ width: "18%" }} /></colgroup>
+          <tbody>
+            <tr><th>MÜŞTERİ ÜNVANI</th><td>{s.customerName}</td><th>TARİHİ</th><td>{shortDate(s.orderDate || s.createdAt)}</td></tr>
+            <tr><th>ADRESİ</th><td>{address}</td><th>SEVK TARİHİ</th><td>{shortDate(firstShipment?.actualDate || firstShipment?.plannedDate)}</td></tr>
+            <tr><th>SEVKİYAT ADRESİ</th><td>{shipmentAddress}</td><th>VERGİ DAİRESİ</th><td>{s.customerTaxOffice}</td></tr>
+            <tr><th>TELEFON</th><td>{s.customerPhone}</td><th>TC/VERGİ NO</th><td>{s.customerTaxNumber}</td></tr>
+            <tr><th>FAX/ E-POSTA</th><td>{s.customerEmail}</td><th>TEKLİF NO</th><td></td></tr>
+          </tbody>
+        </table>
+        <table className="of-items">
+          <colgroup><col style={{ width: "44.5%" }} /><col style={{ width: "11%" }} /><col style={{ width: "9%" }} /><col style={{ width: "14.5%" }} /><col style={{ width: "21%" }} /></colgroup>
+          <thead>
+            <tr><th>ÜRÜN CİNSİ</th><th>MİKTARI</th><th>BİRİMİ</th><th>BİRİM FİYATI</th><th className="of-spaced">TUTARI</th></tr>
+          </thead>
+          <tbody>
+            {data.items.map((item) => (
+              <tr key={item.id}>
+                <td>{item.name}{item.model && item.model !== item.name ? <small> · {item.model}</small> : null}</td>
+                <td className="num">{qty(item.quantity)}</td>
+                <td className="center">{(item.unit || "ADET").toLocaleUpperCase("tr-TR")}</td>
+                <td className="num">{money(item.lineTotal / item.quantity, cur)}</td>
+                <td className="num">{money(item.lineTotal, cur)}</td>
+              </tr>
+            ))}
+            {Array.from({ length: blankRows }, (_, i) => (
+              <tr key={`blank-${i}`} className="blank"><td /><td /><td className="center">ADET</td><td /><td /></tr>
+            ))}
+          </tbody>
+        </table>
+        <p className="of-bank">ÇELMAK TARIM MAK. SAN. TİC. LTD. ŞTİ. işbank Balıkesir Şubesi İban TR69 0006 4000 0012 1003 4047 42</p>
+        <table className="of-bottom">
+          <colgroup><col style={{ width: "21%" }} /><col style={{ width: "43.5%" }} /><col style={{ width: "14.5%" }} /><col style={{ width: "21%" }} /></colgroup>
+          <tbody>
+            <tr className="of-delivery"><td className="center">TESLİM ŞEKLİ: BALIKESİR</td><td className="center"><b>İMZALI KAŞELİ OLARAK ONAYINIZI BEKLİYORUZ.</b></td><td /><td /></tr>
+            <tr className="of-tall"><td rowSpan={2} className="center">ÖDEME</td>
+              <td rowSpan={2} className="of-payment">
+                <b>{method}{s.paymentMethod === "CREDIT_CARD" && s.cardInstallments && s.cardInstallments > 1 ? ` · ${s.cardInstallments} taksit` : ""}</b>
+                {s.downPayment > 0 && <span>Peşinat: {money(s.downPayment, cur)}</span>}
+                {s.advanceAmount > 0 && <span>Avanstan mahsup: {money(s.advanceAmount, cur)}</span>}
+                {installments.slice(0, 6).map((row) => (
+                  <span key={row.sequenceNo}>{row.sequenceNo}. vade {shortDate(row.dueDate)} · {paymentMethodLabels[row.paymentType] || row.paymentType} · {money(row.amount, row.currency)}</span>
                 ))}
-              </tbody>
-            </table>
-          ) : (
-            <p>{s.paymentMethod === "CREDIT_CARD" ? "Kredi kartı ile tahsil edilecek." : s.paymentMethod === "CASH" ? "Peşin tahsil edilecek." : "Ödeme planı yok."}</p>
-          )}
-          {s.note && <p className="doc-note"><b>Not:</b> {s.note}</p>}
-          {data.amendments?.length ? <p className="doc-note"><b>Revize edildi:</b> {data.amendments.map((a) => `${a.number} (${longDate(a.amendmentDate)})`).join(", ")}. Tablo güncel kalemleri gösterir.</p> : null}
-        </div>
-        <div className="doc-totals">
-          <p><span>Ara toplam (KDV hariç)</span><b>{money(s.subtotal, s.currency)}</b></p>
-          <p><span>KDV</span><b>{money(s.vatTotal, s.currency)}</b></p>
-          <p className="grand"><span>Genel toplam</span><b>{money(s.grandTotal, s.currency)}</b></p>
-          {s.downPayment > 0 && <p><span>Peşinat</span><b>− {money(s.downPayment, s.currency)}</b></p>}
-          {s.advanceAmount > 0 && <p><span>Cari avansından mahsup</span><b>− {money(s.advanceAmount, s.currency)}</b></p>}
-          <p><span>Kalan ödeme</span><b>{money(remaining, s.currency)}</b></p>
-          {s.currency !== "TRY" && <p><span>TL karşılığı</span><b>{money(s.grandTotal * s.exchangeRate)}</b></p>}
-        </div>
-      </section>
-      <section className="doc-signatures">
-        <div><span>Satıcı · Çelmak</span></div>
-        <div><span>Alıcı · {s.customerName}</span></div>
-      </section>
+                {installments.length > 6 && <span>+ {installments.length - 6} vade daha (toplam {money(installments.reduce((t, x) => t + x.amount, 0), cur)})</span>}
+                {cur !== "TRY" && <span>Döviz: {cur} · Kur {qty(s.exchangeRate)} · TL karşılığı {money(s.grandTotal * s.exchangeRate)}</span>}
+                {s.note && <span className="of-note">Not: {s.note}</span>}
+                {data.amendments?.length ? <span className="of-note">Revize edildi: {data.amendments.map((a) => `${a.number} (${shortDate(a.amendmentDate)})`).join(", ")}</span> : null}
+              </td>
+              <td>TOPLAM</td><td className="num"><b>{money(s.grandTotal, cur)}</b></td></tr>
+            <tr className="of-tall"><td>BAKİYE:</td><td className="num">{money(remaining, cur)}</td></tr>
+            <tr><td rowSpan={3} className="center of-last">{s.createdBy.toLocaleUpperCase("tr-TR")}</td>
+              <td rowSpan={3} className="of-approval of-last"><b>MÜŞTERİ ONAYI:</b></td>
+              <td>ARA TOPLAM</td><td className="num">{money(s.subtotal, cur)}</td></tr>
+            <tr><td>{vatLabel}</td><td className="center">DAHİL <small>({money(s.vatTotal, cur)})</small></td></tr>
+            <tr><td>GENEL TOPLAM</td><td className="num"><b>{money(s.grandTotal, cur)}</b></td></tr>
+          </tbody>
+        </table>
+        <p className="of-disclaimer">Şirketimizin iş bu formun tamamını veya bir kısmını ve şartları tek taraflı olarak değiştirme veya iptal hakkını saklı tutar.</p>
+        <table className="of-docinfo">
+          <colgroup><col style={{ width: "21%" }} /><col style={{ width: "29.5%" }} /><col style={{ width: "28.5%" }} /><col style={{ width: "21%" }} /></colgroup>
+          <tbody><tr><td>Doküman No : SP.FR.02</td><td>Yayın Tarihi : 04.11.2025</td><td>Revizyon Tarihi :</td><td>Rev : 00</td></tr></tbody>
+        </table>
+      </div>
     </PrintFrame>
   );
 }
@@ -456,6 +490,7 @@ export function MachineReport() {
         </div>
         <button type="button" className="primary-btn no-print" onClick={() => window.print()}><Printer /> Yazdır / PDF</button>
       </div>
+      <div className="no-print"><ReportTabs /></div>
       <section className="panel report-filters no-print">
         <label className="field"><span>Başlangıç</span><input type="date" value={from} max={to} onChange={(e) => setFrom(e.target.value)} /></label>
         <label className="field"><span>Bitiş</span><input type="date" value={to} min={from} onChange={(e) => setTo(e.target.value)} /></label>
@@ -669,7 +704,10 @@ export function SaleReturnPanel({ data, canReturn, onDone }: { data: SaleDoc; ca
 /* Onaylı sipariş revizyonu                                            */
 /* ------------------------------------------------------------------ */
 
+type PlanRow = { paymentType: string; dueDate: string; amount: number };
+const planTypeLabels: Record<string, string> = { BANK_TRANSFER: "Havale / EFT", CHECK: "Çek", PROMISSORY_NOTE: "Senet" };
 const settlementLabels: Record<string, string> = {
+  REPLAN: "Ödeme planı değiştirildi",
   OPEN_ACCOUNT: "Açık cari (Tahsilatlar'dan alınacak)",
   BANK_TRANSFER: "Vadeli havale / EFT",
   CHECK: "Çek",
@@ -697,7 +735,14 @@ export function SaleAmendPanel({ data, canAmend, onDone }: { data: SaleDoc; canA
   const [dueDate, setDueDate] = useState(addDays(todayIso(), 30));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  // Ödeme planını değiştirme: ödenmemiş ve evrakı teslim alınmamış vadeler iptal edilip yeni plan kurulur.
+  const [planMode, setPlanMode] = useState<"KEEP" | "REPLAN">("KEEP");
+  const [plan, setPlan] = useState<PlanRow[]>([]);
+  const [planCount, setPlanCount] = useState(1);
   const amendments = data.amendments || [];
+  const replaceable = data.schedule.filter((x) => x.sequenceNo > 0 && ["PLANNED", "INSTRUMENT_CREATED"].includes(x.status) && x.paidAmount < 0.005 && ["BANK_TRANSFER", "CHECK", "PROMISSORY_NOTE"].includes(x.paymentType) && (!x.instrumentId || x.instrumentStatus === "PLANNED"));
+  const fixedRows = data.schedule.filter((x) => x.sequenceNo > 0 && !replaceable.includes(x) && x.status !== "PAID");
+  const openTotal = Number(replaceable.reduce((t, x) => t + x.amount, 0).toFixed(2));
 
   const start = () => {
     setLines(data.items.map((item) => ({
@@ -706,6 +751,7 @@ export function SaleAmendPanel({ data, canAmend, onDone }: { data: SaleDoc; canA
       shipped: item.shippedQuantity, returned: item.returnedQuantity, original: { quantity: item.quantity, lineTotal: item.lineTotal },
     })));
     setReason(""); setError(""); setSearch(""); setSettlement("OPEN_ACCOUNT"); setDate(todayIso()); setDueDate(addDays(todayIso(), 30));
+    setPlanMode("KEEP"); setPlan(replaceable.map((x) => ({ paymentType: x.paymentType, dueDate: x.dueDate, amount: x.amount }))); setPlanCount(Math.max(1, replaceable.length));
     setOpen(true);
     if (!products.length) api<Product[]>("/products").then(setProducts).catch((e) => setError(e.message));
   };
@@ -713,6 +759,25 @@ export function SaleAmendPanel({ data, canAmend, onDone }: { data: SaleDoc; canA
   const lineTotal = (l: AmendLine) => Number((l.unitPrice * l.quantity).toFixed(2));
   const newTotal = Number(lines.reduce((sum, l) => sum + lineTotal(l), 0).toFixed(2));
   const difference = Number((newTotal - s.grandTotal).toFixed(2));
+  // Sunucudaki hesapla aynı: siparişin plana bağlanmamış ödenmemiş kısmı (bkz. paymentPlanTarget).
+  const fixedPlanned = data.schedule.filter((x) => x.sequenceNo > 0 && !replaceable.includes(x)).reduce((t, x) => t + x.amount, 0);
+  const returnedTotal = (data.returns || []).reduce((t, r) => t + r.grandTotal, 0);
+  const planTarget = Number(Math.max(0, ["CASH", "CREDIT_CARD"].includes(s.paymentMethod) ? openTotal + difference : newTotal - s.downPayment - s.advanceAmount - returnedTotal - fixedPlanned).toFixed(2));
+  const planTotal = Number(plan.reduce((t, x) => t + x.amount, 0).toFixed(2));
+  const planMismatch = planMode === "REPLAN" && plan.length > 0 && Math.abs(planTotal - planTarget) > 0.01;
+  const planInvalid = planMode === "REPLAN" && (planMismatch || plan.some((x) => x.amount <= 0 || !x.dueDate || x.dueDate < date) || (!plan.length && planTarget > 0.009 && !replaceable.length));
+  const distribute = (count: number, type?: string) => {
+    const n = Math.max(1, Math.min(24, count));
+    const base = Math.floor((planTarget / n) * 100) / 100;
+    const firstDue = plan[0]?.dueDate && plan[0].dueDate >= date ? plan[0].dueDate : addDays(date, 30);
+    setPlan(Array.from({ length: n }, (_, i) => ({
+      paymentType: type || plan[i]?.paymentType || plan[0]?.paymentType || "CHECK",
+      dueDate: plan[i]?.dueDate && plan[i].dueDate >= date && i < plan.length ? plan[i].dueDate : addDays(firstDue, 30 * i),
+      amount: i === n - 1 ? Number((planTarget - base * i).toFixed(2)) : base,
+    })));
+  };
+  const setAllTypes = (type: string) => setPlan((cur) => (cur.length ? cur.map((x) => ({ ...x, paymentType: type })) : [{ paymentType: type, dueDate: addDays(date, 30), amount: planTarget }]));
+  const patchPlan = (index: number, change: Partial<PlanRow>) => setPlan((cur) => cur.map((x, i) => (i === index ? { ...x, ...change } : x)));
   const changed = lines.some((l) => !l.original || l.quantity !== l.original.quantity || Math.abs(lineTotal(l) - l.original.lineTotal) >= 0.01);
   const invalid = lines.find((l) => l.quantity < l.shipped || (l.quantity > 0 && l.unitPrice <= 0));
   const kindOk = (p: Product) => (s.orderKind === "SPARE_PART" ? p.partCategory !== "MACHINE" : p.partCategory === "MACHINE");
@@ -738,8 +803,9 @@ export function SaleAmendPanel({ data, canAmend, onDone }: { data: SaleDoc; canA
         body: JSON.stringify({
           amendmentDate: date, reason,
           items: lines.filter((l) => l.saleItemId || l.quantity > 0).map((l) => ({ saleItemId: l.saleItemId, productId: l.productId, quantity: l.quantity, unitPrice: l.unitPrice, vatRate: l.vatRate })),
-          settlement: difference > 0 ? settlement : "OPEN_ACCOUNT",
-          settlementDueDate: difference > 0 && settlement !== "OPEN_ACCOUNT" ? dueDate : undefined,
+          settlement: planMode === "KEEP" && difference > 0 ? settlement : "OPEN_ACCOUNT",
+          settlementDueDate: planMode === "KEEP" && difference > 0 && settlement !== "OPEN_ACCOUNT" ? dueDate : undefined,
+          paymentPlan: planMode === "REPLAN" ? plan : undefined,
         }),
       });
       setOpen(false);
@@ -756,7 +822,7 @@ export function SaleAmendPanel({ data, canAmend, onDone }: { data: SaleDoc; canA
     <section className="panel sale-amend">
       <div className="panel-title">
         <h2>Sipariş revizyonları</h2>
-        {canAmend && approved && !open && <button type="button" className="mini-btn" onClick={start}><PencilLine /> Siparişi revize et</button>}
+        {canAmend && approved && !open && <button type="button" className="mini-btn" onClick={start}><PencilLine /> Siparişi / ödeme şeklini revize et</button>}
       </div>
       {open && (
         <form className="amend-form" onSubmit={submit}>
@@ -797,12 +863,54 @@ export function SaleAmendPanel({ data, canAmend, onDone }: { data: SaleDoc; canA
               <span>{difference > 0.009 ? "Bayiden alınacak ek tutar (cariye borç)" : difference < -0.009 ? "Bayiye alacak / avans olarak işlenir" : "Tutar değişmiyor"}</span>
             </div>
           </div>
-          {difference > 0.009 && (
+          <div className="amend-plan-mode">
+            <b>Ödeme</b>
+            <div className="chip-filters">
+              <button type="button" className={planMode === "KEEP" ? "active" : ""} onClick={() => setPlanMode("KEEP")}>Ödeme planı aynı kalsın</button>
+              <button type="button" className={planMode === "REPLAN" ? "active" : ""} onClick={() => { setPlanMode("REPLAN"); if (!plan.length && planTarget > 0) setPlan([{ paymentType: "CHECK", dueDate: addDays(date, 30), amount: planTarget }]); }}>Ödeme şeklini / planını değiştir</button>
+            </div>
+          </div>
+          {planMode === "KEEP" && difference > 0.009 && (
             <div className="amend-settlement">
               <b>Fark nasıl ödenecek?</b>
               <div className="chip-filters">{["OPEN_ACCOUNT", "BANK_TRANSFER", "CHECK", "PROMISSORY_NOTE"].map((v) => <button type="button" key={v} className={settlement === v ? "active" : ""} onClick={() => setSettlement(v)}>{settlementLabels[v]}</button>)}</div>
               {settlement !== "OPEN_ACCOUNT" && <label className="field"><span>Vade tarihi</span><input type="date" required value={dueDate} onChange={(e) => setDueDate(e.target.value)} /></label>}
               <small className="muted-note">{settlement === "OPEN_ACCOUNT" ? "Fark cari bakiyeye eklenir; ödeme gelince Tahsilatlar ekranından girilir." : settlement === "BANK_TRANSFER" ? "Ödeme planına vadeli havale satırı eklenir." : "Ödeme planına eklenir ve Çek ve Senetler ekranında planlı evrak oluşur."}</small>
+            </div>
+          )}
+          {planMode === "REPLAN" && (
+            <div className="amend-replan">
+              <div className="replan-summary">
+                <div><small>İptal edilip yeniden planlanacak vadeler</small><b>{money(openTotal, s.currency)}</b><span>{replaceable.length ? replaceable.map((x) => `${planTypeLabels[x.paymentType] || x.paymentType} ${longDate(x.dueDate)}`).join(" · ") : "Açık vade yok"}</span></div>
+                {Math.abs(difference) > 0.009 && <div><small>Revizyon farkı</small><b>{difference > 0 ? "+" : "−"}{money(Math.abs(difference), s.currency)}</b></div>}
+                <div className="target"><small>Siparişin ödenmemiş kısmı · yeni plan toplamı</small><b>{money(planTarget, s.currency)}</b>{Math.abs(planTarget - openTotal - difference) > 0.009 && <span>Önceki plan siparişle uyuşmuyordu; yeni plan güncel tutara göre kurulur.</span>}</div>
+              </div>
+              {fixedRows.length > 0 && <p className="muted-note">Değişmeyecek: {fixedRows.map((x) => `${planTypeLabels[x.paymentType] || x.paymentType} ${longDate(x.dueDate)} ${money(x.amount - x.paidAmount, x.currency)}${x.instrumentStatus && x.instrumentStatus !== "PLANNED" ? " (evrak teslim alındı)" : x.paidAmount > 0 ? " (kısmen ödendi)" : ""}`).join(" · ")}</p>}
+              {planTarget > 0.009 && (
+                <>
+                  <div className="replan-tools">
+                    <span>Hepsini şuna çevir:</span>
+                    <div className="chip-filters">{["BANK_TRANSFER", "CHECK", "PROMISSORY_NOTE"].map((t) => <button type="button" key={t} className={plan.length > 0 && plan.every((x) => x.paymentType === t) ? "active" : ""} onClick={() => setAllTypes(t)}>{planTypeLabels[t]}</button>)}</div>
+                    <label className="field"><span>Taksit sayısı</span><input type="number" min={1} max={24} value={planCount} onChange={(e) => setPlanCount(Number(e.target.value))} /></label>
+                    <button type="button" className="mini-btn" onClick={() => distribute(planCount)}>Tutarı eşit dağıt</button>
+                  </div>
+                  <div className="replan-rows">
+                    {plan.map((row, i) => (
+                      <div key={i}>
+                        <span className="row-no">{i + 1}.</span>
+                        <select value={row.paymentType} onChange={(e) => patchPlan(i, { paymentType: e.target.value })} aria-label={`${i + 1}. ödeme şekli`}>{["BANK_TRANSFER", "CHECK", "PROMISSORY_NOTE"].map((t) => <option key={t} value={t}>{planTypeLabels[t]}</option>)}</select>
+                        <input type="date" min={date} value={row.dueDate} onChange={(e) => patchPlan(i, { dueDate: e.target.value })} aria-label={`${i + 1}. vade`} />
+                        <MoneyInput currency={s.currency} value={row.amount} invalid={row.amount <= 0} onChange={(v) => patchPlan(i, { amount: v })} />
+                        <button type="button" className="mini-btn" title="Satırı sil" onClick={() => setPlan((cur) => cur.filter((_, j) => j !== i))}><X /></button>
+                      </div>
+                    ))}
+                    <button type="button" className="mini-btn" onClick={() => setPlan((cur) => [...cur, { paymentType: cur[cur.length - 1]?.paymentType || "CHECK", dueDate: addDays(cur[cur.length - 1]?.dueDate || date, 30), amount: Math.max(0, Number((planTarget - planTotal).toFixed(2))) }])}><Plus /> Vade ekle</button>
+                  </div>
+                  <p className={planMismatch ? "danger-text" : "muted-note"}>Plan toplamı {money(planTotal, s.currency)}{planMismatch ? ` · ${money(Math.abs(planTarget - planTotal), s.currency)} ${planTotal < planTarget ? "eksik" : "fazla"}` : " · tutuyor"}{!plan.length ? " · plan boş: tutar açık cariye kalır" : ""}</p>
+                  {plan.some((x) => x.dueDate < date) && <small className="danger-text replan-warning">Bazı vadeler revizyon tarihinden ({longDate(date)}) önce; bu satırlara yeni vade tarihi girin.</small>}
+                </>
+              )}
+              <small className="muted-note">Eski vadeler ve henüz teslim alınmamış çek/senetler iptal edilir; yeni çek/senetler Çek ve Senetler ekranında planlı evrak olarak oluşur. Teslim alınmış evrak ve ödenmiş vadeler değişmez.</small>
             </div>
           )}
           <div className="form-grid">
@@ -812,7 +920,7 @@ export function SaleAmendPanel({ data, canAmend, onDone }: { data: SaleDoc; canA
           {error && <div className="error-box">{error}</div>}
           <div className="head-actions">
             <button type="button" className="mini-btn" onClick={() => setOpen(false)} disabled={busy}>Vazgeç</button>
-            <button className="primary-btn" disabled={busy || !changed || Boolean(invalid) || reason.trim().length < 3 || !lines.some((l) => l.quantity > 0)}>{busy ? "Kaydediliyor…" : "Revizyonu kaydet"}</button>
+            <button className="primary-btn" disabled={busy || (!changed && planMode !== "REPLAN") || Boolean(invalid) || planInvalid || reason.trim().length < 3 || !lines.some((l) => l.quantity > 0)}>{busy ? "Kaydediliyor…" : "Revizyonu kaydet"}</button>
           </div>
         </form>
       )}
@@ -824,9 +932,10 @@ export function SaleAmendPanel({ data, canAmend, onDone }: { data: SaleDoc; canA
               <span>
                 <b>{a.number} · {longDate(a.amendmentDate)} · {a.createdBy}</b>
                 <small>{a.reason}</small>
+                {a.paymentPlan && <small>Ödeme planı: {a.paymentPlan.replaced.length ? a.paymentPlan.replaced.map((x) => `${planTypeLabels[x.paymentType] || x.paymentType} ${money(x.amount, a.currency)}`).join(", ") : "açık cari"} → {a.paymentPlan.plan.length ? a.paymentPlan.plan.map((x) => `${planTypeLabels[x.paymentType] || x.paymentType} ${shortDate(x.dueDate)} ${money(x.amount, a.currency)}`).join(", ") : "açık cari"}</small>}
                 <small>{a.changes.map((c) => c.oldQuantity === 0 ? `+ ${qty(c.newQuantity)} ${c.product}` : c.newQuantity === 0 ? `− ${c.product} çıkarıldı` : c.oldQuantity !== c.newQuantity ? `${c.product}: ${qty(c.oldQuantity)} → ${qty(c.newQuantity)}` : `${c.product}: fiyat ${money(c.oldTotal, a.currency)} → ${money(c.newTotal, a.currency)}`).join(" · ")}</small>
               </span>
-              <strong className={a.difference > 0 ? "diff-up" : a.difference < 0 ? "diff-down" : ""}>{a.difference > 0 ? "+" : a.difference < 0 ? "−" : ""}{money(Math.abs(a.difference), a.currency)}<small>{a.difference > 0 ? settlementLabels[a.settlement] + (a.settlementDueDate ? ` · ${longDate(a.settlementDueDate)}` : "") : `${money(a.previousTotal, a.currency)} → ${money(a.newTotal, a.currency)}`}</small></strong>
+              <strong className={a.difference > 0 ? "diff-up" : a.difference < 0 ? "diff-down" : ""}>{a.difference > 0 ? "+" : a.difference < 0 ? "−" : ""}{money(Math.abs(a.difference), a.currency)}<small>{a.settlement === "REPLAN" ? settlementLabels.REPLAN : a.difference > 0 ? settlementLabels[a.settlement] + (a.settlementDueDate ? ` · ${longDate(a.settlementDueDate)}` : "") : `${money(a.previousTotal, a.currency)} → ${money(a.newTotal, a.currency)}`}</small></strong>
             </div>
           ))}
         </div>
