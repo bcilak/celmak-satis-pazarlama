@@ -1230,7 +1230,7 @@ function SaleTable({
               <tr key={s.id}>
                 <td>
                   <NavLink className="sale-detail-link" to={`/satislar/${s.id}`}>{s.number}</NavLink>
-                  <small>{formatDate(s.createdAt)}</small>
+                  <small title={`Sisteme giriş: ${formatDate(s.createdAt)}`}>{s.orderDate ? dateOnly(s.orderDate) : formatDate(s.createdAt)}{s.orderDate && s.orderDate < s.createdAt.slice(0, 10) ? " · geçmiş tarihli" : ""}</small>
                 </td>
                 <td>{s.customerName}</td>
                 <td className="amount">
@@ -1276,7 +1276,7 @@ function SaleDetail({user}:{user:User}){
   useEffect(()=>{load()},[load]);
   if(!data)return <div className="loading">Sipariş detayı hazırlanıyor…</div>;const s=data.sale;
   const method=`${paymentTypeLabel(s.paymentMethod)}${s.paymentMethod==="CREDIT_CARD"&&s.cardInstallments&&s.cardInstallments>1?` · ${s.cardInstallments} taksit`:""}`;
-  return <><PageHead eyebrow={`${s.customerCode} · ${s.number}`} title={s.customerName} description={`${formatDate(s.createdAt)} tarihinde ${s.createdBy} tarafından oluşturuldu.`} action={<NavLink className="primary-btn" to={`/satislar/${s.id}/yazdir`}><Printer/>Sipariş PDF</NavLink>}/>
+  return <><PageHead eyebrow={`${s.customerCode} · ${s.number}`} title={s.customerName} description={`Sipariş tarihi ${dateOnly(s.orderDate || s.createdAt.slice(0, 10))} · ${s.createdBy} tarafından ${formatDate(s.createdAt)} tarihinde girildi.`} action={<NavLink className="primary-btn" to={`/satislar/${s.id}/yazdir`}><Printer/>Sipariş PDF</NavLink>}/>
     {message&&<Toast text={message} close={()=>setMessage("")}/>}
     <div className="sale-detail-grid"><section className="panel"><PanelTitle title="Satılan ürünler"/><div className="table-wrap"><table><thead><tr><th>Ürün</th><th>Miktar</th><th>Birim fiyat (KDV dahil)</th><th>KDV</th><th>Satır toplamı</th></tr></thead><tbody>{data.items.map(x=><tr key={x.id}><td><b>{x.name}</b><small>{[x.model,x.code].filter(Boolean).join(" · ")}</small></td><td>{x.quantity} {x.unit}{x.shippedQuantity>0&&<small>{x.shippedQuantity} sevk edildi{x.returnedQuantity>0?` · ${x.returnedQuantity} iade`:""}</small>}</td><td>{money(x.lineTotal/x.quantity,s.currency)}</td><td>%{x.vatRate}</td><td className="amount">{money(x.lineTotal,s.currency)}</td></tr>)}</tbody></table></div></section><aside className="panel sale-financial-summary"><PanelTitle title="Finansal özet"/><p><span>Ara toplam (KDV hariç)</span><b>{money(s.subtotal,s.currency)}</b></p><p><span>KDV</span><b>{money(s.vatTotal,s.currency)}</b></p><p className="grand"><span>Genel toplam</span><b>{money(s.grandTotal,s.currency)}</b></p><p><span>Yeni peşinat</span><b>{money(s.downPayment,s.currency)}</b></p><p><span>Cari avansından mahsup</span><b>{money(s.advanceAmount,s.currency)}</b></p>{data.returns.length>0&&<p><span>İade edilen</span><b>− {money(data.returns.reduce((sum,r)=>sum+r.grandTotal,0),s.currency)}</b></p>}<p><span>Sipariş notu</span><b>{s.note||"—"}</b></p><p><span>Ödeme şekli</span><b>{method}</b></p><p><span>Onay yetkilisi</span><b>{s.approvalAssignee||"Belirlenmedi"}</b></p><Status value={s.status}/></aside></div>
     <section className="panel sale-schedule"><PanelTitle title="Ödeme ve vade planı"/>{data.schedule.length?<div className="compact-list">{data.schedule.map(x=><div key={x.sequenceNo}><span><b>{x.sequenceNo===0?"Peşinat":`${x.sequenceNo}. ödeme`} · {paymentTypeLabel(x.paymentType)}</b><small>{dateOnly(x.dueDate)}</small></span><strong>{money(x.amount,x.currency)}<small>{x.paidAmount?`${money(x.paidAmount,x.currency)} ödendi`:"Ödeme bekleniyor"}</small></strong><Status value={x.status}/></div>)}</div>:<p className="info-note pad">{s.paymentMethod==="CREDIT_CARD"?"Kredi kartıyla tahsil edilir; vade planı oluşmaz.":s.paymentMethod==="CASH"?"Peşin tahsil edilir; vade planı oluşmaz.":"Vade planı yok."}</p>}</section>
@@ -1350,6 +1350,8 @@ function NewSale({spare=false}:{spare?:boolean}) {
   >([]);
   const [payment, setPayment] = useState("TERM");
   const [cardInstallments, setCardInstallments] = useState(1);
+  const today = istanbulToday();
+  const [orderDate, setOrderDate] = useState(today);
   const [down, setDown] = useState(0);
   const [currency, setCurrency] = useState("TRY");
   const [exchangeRate, setExchangeRate] = useState(1);
@@ -1372,12 +1374,12 @@ function NewSale({spare=false}:{spare?:boolean}) {
       setProducts(p);
       setConfig(conf);
       setAssignees(approvers);setApprovalAssigneeId(approvers[0]?.id||0);
-      if(editId) return api<{sale:{customerId:number;status:string;paymentMethod:string;cardInstallments?:number|null;downPayment:number;advanceAmount:number;currency:string;exchangeRate:number;approvalAssigneeId:number;instrumentType:string;orderKind:string;note:string};items:{productId:number;quantity:number;unitPrice:number;vatRate:number;lineTotal:number}[];schedule:{sequenceNo:number;dueDate:string;amount:number}[]}>(`/sales/${editId}/detail`).then(d=>{
+      if(editId) return api<{sale:{customerId:number;status:string;paymentMethod:string;cardInstallments?:number|null;downPayment:number;advanceAmount:number;currency:string;exchangeRate:number;approvalAssigneeId:number;instrumentType:string;orderKind:string;note:string};items:{productId:number;quantity:number;unitPrice:number;vatRate:number;lineTotal:number}[];schedule:{sequenceNo:number;dueDate:string;amount:number}[]}&{sale:{orderDate?:string;createdAt:string}}>(`/sales/${editId}/detail`).then(d=>{
         if(!["DRAFT","REVISION_REQUESTED"].includes(d.sale.status)) throw new Error("Bu sipariş düzenlenemez.");
-        setCustomerId(d.sale.customerId);setPayment(d.sale.paymentMethod);setCardInstallments(d.sale.cardInstallments||1);setDown(d.sale.downPayment);setAdvanceAmount(d.sale.advanceAmount);setCurrency(d.sale.currency);setExchangeRate(d.sale.exchangeRate);setApprovalAssigneeId(d.sale.approvalAssigneeId||approvers[0]?.id||0);setInstrumentType(d.sale.instrumentType||"CHECK");setOrderKind(d.sale.orderKind);setNote(d.sale.note||"");
+        setCustomerId(d.sale.customerId);setOrderDate(d.sale.orderDate||d.sale.createdAt.slice(0,10));setPayment(d.sale.paymentMethod);setCardInstallments(d.sale.cardInstallments||1);setDown(d.sale.downPayment);setAdvanceAmount(d.sale.advanceAmount);setCurrency(d.sale.currency);setExchangeRate(d.sale.exchangeRate);setApprovalAssigneeId(d.sale.approvalAssigneeId||approvers[0]?.id||0);setInstrumentType(d.sale.instrumentType||"CHECK");setOrderKind(d.sale.orderKind);setNote(d.sale.note||"");
         // Formda fiyat KDV dahil gösterilir: satır toplamı / miktar.
         setLines(d.items.map(({productId,quantity,vatRate,lineTotal})=>({productId,quantity,unitPrice:Number((lineTotal/quantity).toFixed(2)),vatRate:normalizeVat(vatRate)})));
-        const plan=d.schedule.filter(x=>x.sequenceNo>0).map(({dueDate,amount})=>({dueDate,amount}));setPaymentSchedule(plan.length?plan:[{dueDate:addDaysToToday(30),amount:0}]);setInstrumentCount(plan.length||1);setTermInstallmentCount(plan.length||1);
+        const plan=d.schedule.filter(x=>x.sequenceNo>0).map(({dueDate,amount})=>({dueDate,amount}));setPaymentSchedule(plan.length?plan:[{dueDate:addDaysTo(d.sale.orderDate||d.sale.createdAt.slice(0,10),30),amount:0}]);setInstrumentCount(plan.length||1);setTermInstallmentCount(plan.length||1);
       });
     }).catch(e=>setError(e.message));
   }, [editId]);
@@ -1462,13 +1464,20 @@ function NewSale({spare=false}:{spare?:boolean}) {
     setPaymentSchedule(
       Array.from({ length: safeCount }, (_, index) => ({
         dueDate:
-          paymentSchedule[index]?.dueDate || addDaysToToday(30 * (index + 1)),
+          paymentSchedule[index]?.dueDate || addDaysTo(orderDate, 30 * (index + 1)),
         amount:
           index === safeCount - 1
             ? Number((remaining - base * index).toFixed(2))
             : base,
       })),
     );
+  };
+  // Sipariş tarihi değişince vade tarihleri aynı gün sayısı kadar kayar (plan sipariş tarihine göre kurulur).
+  const changeOrderDate = (value: string) => {
+    if (!value) return;
+    const shift = Math.round((new Date(`${value}T12:00:00`).getTime() - new Date(`${orderDate}T12:00:00`).getTime()) / 86400000);
+    setOrderDate(value);
+    if (shift) setPaymentSchedule((rows) => rows.map((row) => ({ ...row, dueDate: addDaysTo(row.dueDate, shift) })));
   };
   const planTotal = paymentSchedule.reduce((sum, row) => sum + row.amount, 0);
   const save = async (e: FormEvent) => {
@@ -1484,6 +1493,7 @@ function NewSale({spare=false}:{spare?:boolean}) {
           advanceAmount,
           paymentMethod: fullyFromAdvance ? "TERM" : payment,
           cardInstallments: !fullyFromAdvance && payment === "CREDIT_CARD" ? cardInstallments : undefined,
+          orderDate,
           paymentTermDays: customer?.paymentTermDays || 30,
           downPayment: down,
           currency,
@@ -1570,6 +1580,13 @@ function NewSale({spare=false}:{spare?:boolean}) {
                   </div>
                 </div>
               )}
+              <label className="field order-date-field">
+                <span>Sipariş tarihi</span>
+                <input type="date" required max={today} min="2000-01-01" value={orderDate} onChange={(e) => changeOrderDate(e.target.value)} />
+                {orderDate < today
+                  ? <small className="warn-text">Geçmiş tarihli sipariş: onaylandığında cari borç, peşinat ve peşin/kart tahsilatı bu tarihle işlenir. Vade planı tarihle birlikte kaydırıldı; kontrol edin. Dövizli siparişte o günün kurunu girin.</small>
+                  : <small>Eski bir siparişi giriyorsanız gerçek sipariş tarihini seçin.</small>}
+              </label>
               {customer && <UnbackedReceivableNotice balance={customer.balance} />}
               {customer?.note && <p className="customer-card-note order-customer-note"><b>Cari notu:</b> {customer.note}</p>}
             </div>
@@ -1579,7 +1596,7 @@ function NewSale({spare=false}:{spare?:boolean}) {
             <div className="section-content">
               <h2>Sipariş türü ve ürün seçimi</h2>
               <div className="choice-grid" role="group" aria-label="Sipariş türü">
-                {([["MACHINE","Ana mamul"],["SPARE_PART","Yedek parça"]] as const).map(([kind,label])=><label key={kind} className={orderKind===kind?"selected":""}><input type="radio" name="orderKind" value={kind} checked={orderKind===kind} disabled={lines.length>0&&orderKind!==kind} onChange={()=>{setOrderKind(kind);setProductSearch("");setProductGroup("");setProductSubgroup("");setProductPage(1);setAdvanceAmount(0);setDown(0);setPaymentSchedule([{dueDate:addDaysToToday(30),amount:0}]);setInstrumentCount(1);setTermInstallmentCount(1);}}/><span>{label}</span><CheckCircle2/></label>)}
+                {([["MACHINE","Ana mamul"],["SPARE_PART","Yedek parça"]] as const).map(([kind,label])=><label key={kind} className={orderKind===kind?"selected":""}><input type="radio" name="orderKind" value={kind} checked={orderKind===kind} disabled={lines.length>0&&orderKind!==kind} onChange={()=>{setOrderKind(kind);setProductSearch("");setProductGroup("");setProductSubgroup("");setProductPage(1);setAdvanceAmount(0);setDown(0);setPaymentSchedule([{dueDate:addDaysTo(orderDate,30),amount:0}]);setInstrumentCount(1);setTermInstallmentCount(1);}}/><span>{label}</span><CheckCircle2/></label>)}
               </div>
               <p>{orderKind==="MACHINE"?"Önce ürün ailesini, ardından satılacak modeli seçin. Ana mamul fiyatı siparişte elle girilir.":"Yedek parçalar: standart parça, hazır parça, yarı mamul ve diğer parçalar."} <b>Fiyatı KDV dahil yazın</b>; KDV (%0, %10 veya %20) tutarın içinden ayrılır, üzerine eklenmez.{lines.length>0&&" Sipariş türünü değiştirmek için önce eklenen ürünleri kaldırın."}</p>
               {orderKind==="MACHINE"&&<><div className="machine-groups" role="group" aria-label="Ürün ailesi">{machineGroups.map(group=><button type="button" className={activeProductGroup===group&&!normalizedProductSearch?"active":""} onClick={()=>{setProductGroup(group);setProductSubgroup("");setProductSearch("");setProductPage(1);}} key={group}>{group}<small>{products.filter(p=>p.partCategory==="MACHINE"&&p.productGroup===group).length} model</small></button>)}</div>{machineSubgroups.length>0&&<div className="machine-subgroups" role="group" aria-label={`${activeProductGroup} alt grupları`}><b>Römork alt grubu</b><div>{machineSubgroups.map(subgroup=><button type="button" className={activeProductSubgroup===subgroup&&!normalizedProductSearch?"active":""} onClick={()=>{setProductSubgroup(subgroup);setProductSearch("");setProductPage(1);}} key={subgroup}>{subgroup}<small>{products.filter(p=>p.productSubgroup===subgroup).length} model</small></button>)}</div></div>}</>}
@@ -1935,6 +1952,18 @@ function EditablePaymentPlan({
 /** Ürün kaydındaki KDV 0/10/20 dışındaysa (eski kayıt) varsayılan %20 kullanılır. */
 function normalizeVat(rate: number) {
   return (VAT_RATES as readonly number[]).includes(rate) ? rate : 20;
+}
+
+/** Türkiye saatine göre bugünün tarihi (YYYY-AA-GG). */
+function istanbulToday() {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Istanbul", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+}
+
+/** Verilen tarihe gün ekler (YYYY-AA-GG). */
+function addDaysTo(date: string, days: number) {
+  const value = new Date(`${date}T12:00:00Z`);
+  value.setUTCDate(value.getUTCDate() + days);
+  return value.toISOString().slice(0, 10);
 }
 
 function addDaysToToday(days: number) {

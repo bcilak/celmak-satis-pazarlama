@@ -226,7 +226,7 @@ type SaleDoc = {
   sale: {
     id: number; number: string; status: string; note?: string; paymentMethod: string; cardInstallments?: number | null;
     subtotal: number; vatTotal: number; grandTotal: number; downPayment: number; advanceAmount: number;
-    currency: string; exchangeRate: number; createdAt: string; approvedAt?: string | null;
+    currency: string; exchangeRate: number; createdAt: string; orderDate?: string; approvedAt?: string | null;
     customerId: number; customerCode: string; customerName: string; customerTaxNumber?: string; customerPhone?: string; customerEmail?: string; customerCity?: string;
     createdBy: string; approvalAssignee?: string;
   };
@@ -251,7 +251,7 @@ export function SalePrint() {
   const method = paymentMethodLabels[s.paymentMethod] || s.paymentMethod;
   return (
     <PrintFrame title={`${s.number} sipariş formu`} fileName={`${s.number} Siparis Formu`}>
-      <DocHeader title="SİPARİŞ FORMU" number={s.number} date={longDate(s.createdAt)} extra={<p><span>Durum</span><b>{statusLabels[s.status] || s.status}</b></p>} />
+      <DocHeader title="SİPARİŞ FORMU" number={s.number} date={longDate(s.orderDate || s.createdAt)} extra={<p><span>Durum</span><b>{statusLabels[s.status] || s.status}</b></p>} />
       <section className="doc-parties">
         <div>
           <small>ALICI</small>

@@ -456,6 +456,9 @@ export function migrate() {
   addColumn('customers', 'district', 'TEXT')
   addColumn('customers', 'address', 'TEXT')
   addColumn('sales', 'card_installments', 'INTEGER')
+  // Sipariş tarihi: geçmiş tarihli sipariş girilebilsin diye kayıt zamanından (created_at) ayrı tutulur.
+  addColumn('sales', 'order_date', 'TEXT')
+  db.exec("UPDATE sales SET order_date=date(created_at) WHERE order_date IS NULL")
 
   // Sipariş iadeleri: sevk edilmiş ürünlerin geri alınması ve cariye alacak kaydı.
   db.exec(`CREATE TABLE IF NOT EXISTS sale_returns (

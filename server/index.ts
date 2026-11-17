@@ -148,6 +148,8 @@ const passwordValid = (password: string, stored: string) => {
     timingSafeEqual(Buffer.from(hash, "hex"), scryptSync(password, salt, 64)),
   );
 };
+/** Türkiye saatine göre bugünün tarihi (YYYY-AA-GG); UTC gece yarısı farkını önler. */
+const istanbulToday = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Istanbul", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 const hashPassword = (password: string) => {
   const salt = randomBytes(16).toString("hex");
   return `${salt}:${scryptSync(password, salt, 64).toString("hex")}`;
@@ -798,7 +800,7 @@ app.get("/api/dashboard", (req, res) => {
     .get();
   const recent = db
     .prepare(
-      `SELECT s.id, s.number, s.status, s.grand_total grandTotal, s.created_at createdAt,
+      `SELECT s.id, s.number, s.status, s.grand_total grandTotal, s.created_at createdAt, COALESCE(s.order_date,date(s.created_at)) orderDate,
     c.name customerName, u.name createdBy FROM sales s JOIN customers c ON c.id=s.customer_id JOIN users u ON u.id=s.created_by
     ORDER BY s.id DESC LIMIT 6`,
     )
@@ -979,7 +981,7 @@ app.get("/api/customers/:id", (req, res) => {
     return res.status(404).json({ message: "Müşteri bulunamadı." });
   const sales = db
     .prepare(
-      `SELECT s.id,s.number,s.status,s.order_kind orderKind,s.payment_method paymentMethod,s.grand_total grandTotal,s.currency,s.exchange_rate exchangeRate,s.instrument_type instrumentType,s.instrument_count instrumentCount,s.created_at createdAt,
+      `SELECT s.id,s.number,s.status,s.order_kind orderKind,s.payment_method paymentMethod,s.grand_total grandTotal,s.currency,s.exchange_rate exchangeRate,s.instrument_type instrumentType,s.instrument_count instrumentCount,s.created_at createdAt,COALESCE(s.order_date,date(s.created_at)) orderDate,
     c.name customerName,c.code customerCode,u.name createdBy,
     (SELECT COALESCE(SUM(si.quantity),0) FROM sale_items si WHERE si.sale_id=s.id) totalQuantity
     FROM sales s JOIN customers c ON c.id=s.customer_id JOIN users u ON u.id=s.created_by WHERE s.customer_id=? ORDER BY s.id DESC`,
@@ -1568,6 +1570,8 @@ const saleSchema = z.object({
   termInstallmentCount: z.number().int().min(1).max(24).default(1),
   firstDueDate: z.string().date().optional(),
   dueIntervalDays: z.number().int().min(1).max(365).optional(),
+  /** Sipariş tarihi; geçmiş tarihli sipariş için. Boşsa bugün. */
+  orderDate: z.string().date().optional(),
   note: z.string().max(500).optional(),
   items: z
     .array(
@@ -1591,7 +1595,7 @@ app.get("/api/sales", (_req, res) => {
     .prepare(
       `SELECT s.id, s.number, s.status, s.payment_method paymentMethod,
     s.grand_total grandTotal, s.currency, s.exchange_rate exchangeRate, s.instrument_type instrumentType,
-    s.instrument_count instrumentCount, s.created_at createdAt, s.order_kind orderKind, c.name customerName, c.code customerCode,
+    s.instrument_count instrumentCount, s.created_at createdAt, COALESCE(s.order_date,date(s.created_at)) orderDate, s.order_kind orderKind, c.name customerName, c.code customerCode,
     u.name createdBy FROM sales s JOIN customers c ON c.id=s.customer_id JOIN users u ON u.id=s.created_by ORDER BY s.id DESC`,
     )
     .all();
@@ -1601,7 +1605,7 @@ app.get("/api/sales", (_req, res) => {
 app.get("/api/approval-assignees", allow("SALES","ADMIN"), (req,res)=>res.json(db.prepare("SELECT id,name,email FROM users WHERE role='ADMIN' AND active=1 AND id<>? ORDER BY name").all(req.user.id)));
 
 app.get("/api/sales/:id/detail", (req,res)=>{
-  const id=Number(req.params.id);const sale=db.prepare(`SELECT s.id,s.number,s.status,s.note,s.order_kind orderKind,s.advance_amount advanceAmount,s.approval_assignee_id approvalAssigneeId,s.instrument_type instrumentType,s.payment_method paymentMethod,s.card_installments cardInstallments,s.subtotal,s.vat_total vatTotal,s.grand_total grandTotal,s.down_payment downPayment,s.currency,s.exchange_rate exchangeRate,s.created_at createdAt,s.approved_at approvedAt,c.id customerId,c.code customerCode,c.name customerName,c.tax_number customerTaxNumber,c.phone customerPhone,c.email customerEmail,c.city customerCity,u.name createdBy,a.name approvalAssignee FROM sales s JOIN customers c ON c.id=s.customer_id JOIN users u ON u.id=s.created_by LEFT JOIN users a ON a.id=s.approval_assignee_id WHERE s.id=?`).get(id);
+  const id=Number(req.params.id);const sale=db.prepare(`SELECT s.id,s.number,s.status,s.note,s.order_kind orderKind,s.advance_amount advanceAmount,s.approval_assignee_id approvalAssigneeId,s.instrument_type instrumentType,s.payment_method paymentMethod,s.card_installments cardInstallments,s.subtotal,s.vat_total vatTotal,s.grand_total grandTotal,s.down_payment downPayment,s.currency,s.exchange_rate exchangeRate,s.created_at createdAt,COALESCE(s.order_date,date(s.created_at)) orderDate,s.approved_at approvedAt,c.id customerId,c.code customerCode,c.name customerName,c.tax_number customerTaxNumber,c.phone customerPhone,c.email customerEmail,c.city customerCity,u.name createdBy,a.name approvalAssignee FROM sales s JOIN customers c ON c.id=s.customer_id JOIN users u ON u.id=s.created_by LEFT JOIN users a ON a.id=s.approval_assignee_id WHERE s.id=?`).get(id);
   if(!sale)return res.status(404).json({message:"Satış bulunamadı."});
   const items=db.prepare(`SELECT si.id,si.product_id productId,p.code,p.name,p.unit,p.manufacturer_model model,p.product_group productGroup,si.quantity,si.unit_price unitPrice,si.vat_rate vatRate,si.line_total lineTotal,
     (SELECT COALESCE(SUM(shi.quantity),0) FROM shipment_items shi JOIN shipments sh ON sh.id=shi.shipment_id WHERE shi.sale_item_id=si.id AND sh.status<>'CANCELLED') shippedQuantity,
@@ -1677,7 +1681,7 @@ app.get("/api/reports/machine-orders", (req, res) => {
       ROUND(SUM(si.line_total*s.exchange_rate),2) tryTotal,
       COUNT(DISTINCT s.id) orderCount
     FROM sale_items si JOIN sales s ON s.id=si.sale_id JOIN products p ON p.id=si.product_id JOIN customers c ON c.id=s.customer_id
-    WHERE p.part_category='MACHINE' AND s.status IN (${statuses.map(() => "?").join(",")}) AND date(s.created_at) BETWEEN ? AND ?
+    WHERE p.part_category='MACHINE' AND s.status IN (${statuses.map(() => "?").join(",")}) AND COALESCE(s.order_date,date(s.created_at)) BETWEEN ? AND ?
     GROUP BY c.id,p.id ORDER BY c.name,p.product_group,p.name`).all(...statuses, from, to);
   res.json({ from, to, includePending: statuses.length === 3, rows });
 });
@@ -1720,6 +1724,9 @@ const saveSale = (req: Request, res: Response) => {
       });
   if (input.currency === "TRY" && input.exchangeRate !== 1)
     return res.status(400).json({ message: "TL işlemlerde kur 1 olmalıdır." });
+  const orderDate = input.orderDate ?? istanbulToday();
+  if (orderDate > istanbulToday()) return res.status(400).json({ message: "Sipariş tarihi bugünden ileri olamaz." });
+  if (orderDate < "2000-01-01") return res.status(400).json({ message: "Sipariş tarihi geçersiz." });
   const customer = db
     .prepare("SELECT * FROM customers WHERE id=? AND active=1")
     .get(input.customerId) as Record<string, unknown> | undefined;
@@ -1810,7 +1817,7 @@ const saveSale = (req: Request, res: Response) => {
         );
       const saleId = Number(result.lastInsertRowid);
       const number = previous?.number ?? `SAT-${new Date().getFullYear()}-${String(saleId).padStart(6, "0")}`;
-      db.prepare("UPDATE sales SET order_kind=?,advance_amount=?,card_installments=? WHERE id=?").run(input.orderKind,input.advanceAmount,input.paymentMethod==="CREDIT_CARD"?(input.cardInstallments??1):null,saleId);
+      db.prepare("UPDATE sales SET order_kind=?,advance_amount=?,card_installments=?,order_date=?,exchange_rate_date=? WHERE id=?").run(input.orderKind,input.advanceAmount,input.paymentMethod==="CREDIT_CARD"?(input.cardInstallments??1):null,orderDate,orderDate,saleId);
       db.prepare("UPDATE sales SET number=? WHERE id=?").run(number, saleId);
       const addItem = db.prepare(
         `INSERT INTO sale_items (sale_id, product_id, quantity, unit_price, vat_rate, line_total) VALUES (?, ?, ?, ?, ?, ?)`,
@@ -1826,8 +1833,8 @@ const saveSale = (req: Request, res: Response) => {
         );
       if (input.downPayment > 0)
         db.prepare(
-          `INSERT INTO payment_schedules (sale_id,sequence_no,payment_type,due_date,amount,currency,exchange_rate) VALUES (?,0,'CASH',date('now'),?,?,?)`,
-        ).run(saleId, input.downPayment, input.currency, input.exchangeRate);
+          `INSERT INTO payment_schedules (sale_id,sequence_no,payment_type,due_date,amount,currency,exchange_rate) VALUES (?,0,'CASH',?,?,?,?)`,
+        ).run(saleId, orderDate, input.downPayment, input.currency, input.exchangeRate);
       if (usesInstrument && remainingTotal > 0) {
         const plan = input.paymentSchedule!;
         const addSchedule = db.prepare(
@@ -1867,7 +1874,7 @@ const saveSale = (req: Request, res: Response) => {
         "sale",
         saleId,
         previous ?? null,
-        { number, ...input, subtotal, vatTotal, grandTotal },
+        { number, ...input, orderDate, subtotal, vatTotal, grandTotal },
         req.ip,
         req.correlationId,
       );
@@ -2032,9 +2039,10 @@ app.post("/api/approvals/:id/decision", allow("ADMIN"), (req, res) => {
     if (parsed.data.decision === "APPROVED") {
       const sale = db
         .prepare(
-          "SELECT customer_id,exchange_rate,currency,grand_total,down_payment,advance_amount,number,payment_method FROM sales WHERE id=?",
+          "SELECT customer_id,exchange_rate,currency,grand_total,down_payment,advance_amount,number,payment_method,COALESCE(order_date,date(created_at)) order_date FROM sales WHERE id=?",
         )
         .get(approval.entity_id) as {
+        order_date: string;
         customer_id: number;
         exchange_rate: number;
         currency: string;
@@ -2047,7 +2055,7 @@ app.post("/api/approvals/:id/decision", allow("ADMIN"), (req, res) => {
       postLedger({
         customerId: sale.customer_id,
         type: "SALE",
-        date: new Date().toISOString().slice(0, 10),
+        date: sale.order_date,
         description: `${sale.number} satış borcu`,
         debit: sale.grand_total * sale.exchange_rate,
         currency: sale.currency,
@@ -2061,7 +2069,7 @@ app.post("/api/approvals/:id/decision", allow("ADMIN"), (req, res) => {
         postLedger({
           customerId: sale.customer_id,
           type: "DOWN_PAYMENT",
-          date: new Date().toISOString().slice(0, 10),
+          date: sale.order_date,
           description: `${sale.number} peşinat`,
           credit: sale.down_payment * sale.exchange_rate,
           currency: sale.currency,
@@ -2075,7 +2083,7 @@ app.post("/api/approvals/:id/decision", allow("ADMIN"), (req, res) => {
         postLedger({
           customerId: sale.customer_id,
           type: "CASH_RECEIPT",
-          date: new Date().toISOString().slice(0, 10),
+          date: sale.order_date,
           description: `${sale.number} peşin tahsilat`,
           credit: (sale.grand_total - sale.down_payment - sale.advance_amount) * sale.exchange_rate,
           currency: sale.currency,
@@ -2089,7 +2097,7 @@ app.post("/api/approvals/:id/decision", allow("ADMIN"), (req, res) => {
         postLedger({
           customerId: sale.customer_id,
           type: "CARD_RECEIPT",
-          date: new Date().toISOString().slice(0, 10),
+          date: sale.order_date,
           description: `${sale.number} kredi kartı tahsilatı`,
           credit: (sale.grand_total - sale.down_payment - sale.advance_amount) * sale.exchange_rate,
           currency: sale.currency,

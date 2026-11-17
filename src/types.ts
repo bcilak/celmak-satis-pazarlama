@@ -59,6 +59,8 @@ export type Sale = {
   instrumentType?: string;
   instrumentCount: number;
   createdAt: string;
+  /** Siparişin iş tarihi (geçmiş tarihli girilebilir); createdAt sisteme giriş zamanıdır. */
+  orderDate?: string;
   customerName: string;
   customerCode: string;
   createdBy: string;

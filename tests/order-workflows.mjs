@@ -181,6 +181,25 @@ try {
  await loginAs('deniz@celmak.com','Benim-Parolam-2026',401);
  assert.equal((await loginAs('deniz@celmak.com','Yeni-Gecici-77')).body.mustChangePassword,true);
 
+ // Geçmiş tarihli sipariş: cari hareketler sipariş tarihiyle işlenir, ileri tarih reddedilir.
+ const pastCustomer=await request(sales,'/customers','POST',{name:'Eski Sipariş Cari',tags:['DEALER']},201);
+ const pastOrder={...mixed,customerId:pastCustomer.id,advanceAmount:0,downPayment:0,paymentMethod:'CASH',orderDate:'2025-03-10'};
+ const tomorrow=new Date(Date.now()+2*86400000).toISOString().slice(0,10);
+ await request(sales,'/sales','POST',{...pastOrder,orderDate:tomorrow},400);
+ const past=await request(sales,'/sales','POST',pastOrder,201);
+ await request(sales,`/sales/${past.id}/submit`,'POST');approval=await approvalFor(past.id);
+ await request(admin,`/approvals/${approval.id}/decision`,'POST',{decision:'APPROVED'});
+ detail=await request(admin,`/sales/${past.id}/detail`);assert.equal(detail.sale.orderDate,'2025-03-10');
+ assert.equal((await request(admin,'/sales')).find(x=>x.id===past.id).orderDate,'2025-03-10');
+ const pastLedger=await request(admin,`/customers/${pastCustomer.id}/ledger`);
+ assert.ok(pastLedger.transactions.every(t=>t.transactionDate==='2025-03-10'),'Borç ve peşin tahsilat sipariş tarihiyle işlenmeli');
+ assert.equal(pastLedger.customer.balance,0);
+ const pastReport=await request(sales,'/reports/machine-orders?from=2025-03-01&to=2025-03-31');
+ assert.ok(pastReport.rows.some(r=>r.customerId===pastCustomer.id),'Rapor sipariş tarihine göre süzmeli');
+ // Vadeli geçmiş sipariş: peşinat satırı da sipariş tarihli olur.
+ const pastTerm=await request(sales,'/sales','POST',{...pastOrder,paymentMethod:'MIXED',instrumentType:'CHECK',instrumentCount:1,downPayment:10000,paymentSchedule:[{dueDate:'2025-04-10',amount:100000}]},201);
+ detail=await request(admin,`/sales/${pastTerm.id}/detail`);assert.equal(detail.schedule.find(x=>x.sequenceNo===0).dueDate,'2025-03-10');
+
  const checksCustomer=await request(sales,'/customers','POST',{name:'Çek Bağlantı Test Cari',riskLimit:5000000},201);
  const checksBalance=async()=> (await request(admin,`/customers/${checksCustomer.id}/ledger`)).customer.balance;
  const checks=[500000,500000,1000000,1000000].map((amount,i)=>({amount,issuer:'Test Keşideci',bankName:'Test Bankası',serialNumber:`BAG-${i}`,issueDate:'2026-10-01',dueDate:`2027-0${i+1}-15`}));
@@ -207,7 +226,7 @@ try {
  assert.equal(history[0].checks[0].status,'COLLECTED');assert.equal(history[0].checks[1].status,'BOUNCED');
  console.log('PASS: eşit olmayan 4 çek, hedef/toplam farkı, grup kaydı, mükerrer/tekrar istek koruması, atomik geri alma, tahsilat ve karşılıksız çek bakiyesi');
  console.log('PASS: parça siparişi, düzenleme, revizyon, onay, 2 milyon avans, makine/parça mahsup, kısmi avans, mükerrer ve yetersiz bakiye kontrolleri');
- console.log('PASS: KDV dahil fiyat, 0/10/20 KDV kısıtı, kredi kartı tahsilatı, iade (sevk/yetki/miktar kontrolleri), makine raporu, cari notu, Excel ile toplu cari, cari düzenleme ve silme, açılış bakiyesi (devir), kullanıcı yönetimi ve parola değiştirme');
+ console.log('PASS: KDV dahil fiyat, 0/10/20 KDV kısıtı, kredi kartı tahsilatı, iade (sevk/yetki/miktar kontrolleri), makine raporu, cari notu, Excel ile toplu cari, cari düzenleme ve silme, açılış bakiyesi (devir), kullanıcı yönetimi ve parola değiştirme, geçmiş tarihli sipariş');
 } finally {
  server.kill();await new Promise(r=>server.once('exit',r));
  assert.equal(dirname(resolve(dataDir)),resolve(tmpdir()));
